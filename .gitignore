@@ -1,4 +1,5 @@
 /superpowers/doc/
+/.worktrees/
 /target/
 /dist/
 *.pdb
