@@ -16,7 +16,6 @@ use std::sync::{
 #[derive(Clone, Debug, Default)]
 pub struct DeviceList {
     pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +29,7 @@ pub enum AudioStatus {
 pub struct TelemetrySnapshot {
     pub input_dbfs: [f32; 2],
     pub output_dbfs: [f32; 2],
+    pub a_weighted_dbfs: [f32; 2],
     pub underruns: u64,
     pub overflows: u64,
     pub learning_progress: f32,
@@ -98,6 +98,7 @@ impl AtomicControls {
 struct SharedTelemetry {
     input: [AtomicU32; 2],
     output: [AtomicU32; 2],
+    a_weighted: [AtomicU32; 2],
     underruns: AtomicU64,
     overflows: AtomicU64,
     learning: AtomicU32,
@@ -113,6 +114,10 @@ impl Default for SharedTelemetry {
                 AtomicU32::new((-60.0_f32).to_bits()),
             ],
             output: [
+                AtomicU32::new((-60.0_f32).to_bits()),
+                AtomicU32::new((-60.0_f32).to_bits()),
+            ],
+            a_weighted: [
                 AtomicU32::new((-60.0_f32).to_bits()),
                 AtomicU32::new((-60.0_f32).to_bits()),
             ],
@@ -155,12 +160,7 @@ impl AudioEngine {
             .map_err(|e| e.to_string())?
             .map(|d| device_label(&d))
             .collect();
-        let outputs = host
-            .output_devices()
-            .map_err(|e| e.to_string())?
-            .map(|d| device_label(&d))
-            .collect();
-        Ok(DeviceList { inputs, outputs })
+        Ok(DeviceList { inputs })
     }
 
     pub fn set_controls(&self, controls: DspControls) {
@@ -191,6 +191,8 @@ impl AudioEngine {
                 .map(|i| f32::from_bits(self.telemetry.input[i].load(Ordering::Relaxed))),
             output_dbfs: [0, 1]
                 .map(|i| f32::from_bits(self.telemetry.output[i].load(Ordering::Relaxed))),
+            a_weighted_dbfs: [0, 1]
+                .map(|i| f32::from_bits(self.telemetry.a_weighted[i].load(Ordering::Relaxed))),
             underruns: self.telemetry.underruns.load(Ordering::Relaxed),
             overflows: self.telemetry.overflows.load(Ordering::Relaxed),
             learning_progress: f32::from_bits(self.telemetry.learning.load(Ordering::Relaxed)),
@@ -203,7 +205,7 @@ impl AudioEngine {
         }
     }
 
-    pub fn start(&mut self, input_index: usize, output_index: usize) -> Result<u32, String> {
+    pub fn start(&mut self, input_index: usize) -> Result<u32, String> {
         self.stop();
         let host = cpal::default_host();
         let input = host
@@ -212,10 +214,8 @@ impl AudioEngine {
             .nth(input_index)
             .ok_or("Selected input is no longer available")?;
         let output = host
-            .output_devices()
-            .map_err(|e| e.to_string())?
-            .nth(output_index)
-            .ok_or("Selected output is no longer available")?;
+            .default_output_device()
+            .ok_or("The operating system has no default playback device")?;
         let (input_config, output_config) = select_configs(&input, &output)?;
         let sample_rate = input_config.sample_rate();
         let ring = HeapRb::<[f32; 2]>::new((sample_rate as usize * 120) / 1_000);
@@ -489,6 +489,8 @@ where
                         dbfs(levels.output_peak[channel]).to_bits(),
                         Ordering::Relaxed,
                     );
+                    telemetry.a_weighted[channel]
+                        .store(levels.a_weighted_dbfs[channel].to_bits(), Ordering::Relaxed);
                 }
                 telemetry
                     .learning

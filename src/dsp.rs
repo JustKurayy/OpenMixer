@@ -20,9 +20,9 @@ pub struct DspControls {
 impl Default for DspControls {
     fn default() -> Self {
         Self {
-            hum_hz: Some(50.0),
-            low_cut: true,
-            noise_reduction: 0.45,
+            hum_hz: None,
+            low_cut: false,
+            noise_reduction: 0.0,
             bass_db: 0.0,
             treble_db: 0.0,
             gain_percent: 25.0,
@@ -39,6 +39,7 @@ pub struct Levels {
     pub input_rms: [f32; 2],
     pub output_peak: [f32; 2],
     pub output_rms: [f32; 2],
+    pub a_weighted_dbfs: [f32; 2],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +61,121 @@ pub fn meter_band(level_dbfs: f32) -> MeterBand {
     } else {
         MeterBand::Green
     }
+}
+
+pub fn estimated_dba(a_weighted_dbfs: f32, full_scale_dba: f32) -> f32 {
+    (a_weighted_dbfs + full_scale_dba).clamp(0.0, 130.0)
+}
+
+pub fn dba_meter_band(level_dba: f32) -> MeterBand {
+    if level_dba >= 90.0 {
+        MeterBand::Red
+    } else if level_dba >= 85.0 {
+        MeterBand::Orange
+    } else {
+        MeterBand::Green
+    }
+}
+
+struct AWeightedMeter {
+    filters: [AWeightingFilter; 2],
+    mean_square: [f64; 2],
+}
+
+impl AWeightedMeter {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            filters: std::array::from_fn(|_| AWeightingFilter::new(sample_rate as f64)),
+            mean_square: [0.0; 2],
+        }
+    }
+
+    fn process(&mut self, frame: [f32; 2]) {
+        for (channel, sample) in frame.into_iter().enumerate() {
+            let weighted = self.filters[channel].process(sample as f64);
+            self.mean_square[channel] =
+                self.mean_square[channel] * 0.9995 + weighted * weighted * 0.0005;
+        }
+    }
+
+    fn dbfs_channels(&self) -> [f32; 2] {
+        self.mean_square.map(|power| dbfs(power.sqrt() as f32))
+    }
+
+    #[cfg(test)]
+    fn dbfs(&self) -> f32 {
+        self.dbfs_channels()[0]
+    }
+}
+
+struct AWeightingFilter {
+    b: [f64; 7],
+    a: [f64; 7],
+    state: [f64; 6],
+}
+
+impl AWeightingFilter {
+    fn new(sample_rate: f64) -> Self {
+        let analog_poles = [
+            -2.0 * std::f64::consts::PI * 20.598_997,
+            -2.0 * std::f64::consts::PI * 20.598_997,
+            -2.0 * std::f64::consts::PI * 107.652_65,
+            -2.0 * std::f64::consts::PI * 737.862_23,
+            -2.0 * std::f64::consts::PI * 12_194.217,
+            -2.0 * std::f64::consts::PI * 12_194.217,
+        ];
+        let digital_poles =
+            analog_poles.map(|pole| (2.0 * sample_rate + pole) / (2.0 * sample_rate - pole));
+        let digital_zeros = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0];
+        let mut b = polynomial_from_roots(digital_zeros);
+        let a = polynomial_from_roots(digital_poles);
+
+        let omega = 2.0 * std::f64::consts::PI * 1_000.0 / sample_rate;
+        let numerator = response_magnitude(&b, omega);
+        let denominator = response_magnitude(&a, omega);
+        let gain = denominator / numerator;
+        for coefficient in &mut b {
+            *coefficient *= gain;
+        }
+
+        Self {
+            b,
+            a,
+            state: [0.0; 6],
+        }
+    }
+
+    fn process(&mut self, input: f64) -> f64 {
+        let output = self.b[0] * input + self.state[0];
+        for index in 0..5 {
+            self.state[index] =
+                self.b[index + 1] * input + self.state[index + 1] - self.a[index + 1] * output;
+        }
+        self.state[5] = self.b[6] * input - self.a[6] * output;
+        output
+    }
+}
+
+fn polynomial_from_roots(roots: [f64; 6]) -> [f64; 7] {
+    let mut coefficients = [0.0; 7];
+    coefficients[0] = 1.0;
+    for (degree, root) in roots.into_iter().enumerate() {
+        for index in (1..=degree + 1).rev() {
+            coefficients[index] -= root * coefficients[index - 1];
+        }
+    }
+    coefficients
+}
+
+fn response_magnitude(coefficients: &[f64; 7], omega: f64) -> f64 {
+    let mut real = 0.0;
+    let mut imaginary = 0.0;
+    for (index, coefficient) in coefficients.iter().enumerate() {
+        let angle = -(index as f64) * omega;
+        real += coefficient * angle.cos();
+        imaginary += coefficient * angle.sin();
+    }
+    real.hypot(imaginary)
 }
 
 #[derive(Clone, Copy)]
@@ -268,9 +384,7 @@ impl SpectralReducer {
         for channel in 0..2 {
             self.inverse.process(&mut self.fft[channel]);
             for n in 0..FFT_SIZE {
-                let window = 0.5 - 0.5 * (2.0 * PI * n as f32 / FFT_SIZE as f32).cos();
-                self.overlap[n][channel] +=
-                    self.fft[channel][n].re * window * (2.0 / FFT_SIZE as f32);
+                self.overlap[n][channel] += self.fft[channel][n].re / FFT_SIZE as f32;
             }
         }
         for n in 0..HOP_SIZE {
@@ -312,6 +426,7 @@ pub struct DspEngine {
     last_treble: f32,
     gain: f32,
     spectral: SpectralReducer,
+    a_weighted_meter: AWeightedMeter,
     levels: Levels,
 }
 
@@ -329,6 +444,7 @@ impl DspEngine {
             last_treble: f32::NAN,
             gain: 0.0,
             spectral: SpectralReducer::new(),
+            a_weighted_meter: AWeightedMeter::new(sample_rate),
             levels: Levels::default(),
         }
     }
@@ -370,7 +486,9 @@ impl DspEngine {
                 *sample = self.bass[channel].process(*sample);
                 *sample = self.treble[channel].process(*sample);
             }
-            frame = self.spectral.process(frame, controls.noise_reduction);
+            if controls.noise_reduction > 0.0 || self.spectral.learning_progress() < 1.0 {
+                frame = self.spectral.process(frame, controls.noise_reduction);
+            }
         }
         if controls.muted {
             frame = [0.0; 2];
@@ -383,6 +501,8 @@ impl DspEngine {
             }
         }
         self.update_levels(frame, false);
+        self.a_weighted_meter.process(frame);
+        self.levels.a_weighted_dbfs = self.a_weighted_meter.dbfs_channels();
         frame
     }
 
@@ -544,6 +664,41 @@ mod tests {
             assert!((output[0] - input[0]).abs() < 0.001);
             assert!((output[1] - input[1]).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn default_processing_preserves_music_after_gain_settles() {
+        let controls = DspControls {
+            gain_percent: 100.0,
+            ..Default::default()
+        };
+        let input = sine(1_000.0, 48_000.0, 12_000, 0.4);
+        let mut output = input.clone();
+        DspEngine::new(48_000.0).process_buffer(&mut output, &controls);
+        let input_rms = rms(&input[8_000..]);
+        let output_rms = rms(&output[8_000..]);
+        assert!((output_rms / input_rms - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_weighting_rejects_mains_hum_more_than_midrange() {
+        let mut hum_meter = AWeightedMeter::new(48_000.0);
+        let mut music_meter = AWeightedMeter::new(48_000.0);
+        for frame in sine(50.0, 48_000.0, 48_000, 0.5) {
+            hum_meter.process(frame);
+        }
+        for frame in sine(1_000.0, 48_000.0, 48_000, 0.5) {
+            music_meter.process(frame);
+        }
+        assert!(music_meter.dbfs() - hum_meter.dbfs() > 25.0);
+    }
+
+    #[test]
+    fn calibrated_dba_uses_hearing_risk_bands() {
+        assert!((estimated_dba(-20.0, 100.0) - 80.0).abs() < 0.001);
+        assert_eq!(dba_meter_band(79.9), MeterBand::Green);
+        assert_eq!(dba_meter_band(85.0), MeterBand::Orange);
+        assert_eq!(dba_meter_band(90.0), MeterBand::Red);
     }
 
     #[test]
