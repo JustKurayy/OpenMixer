@@ -78,18 +78,24 @@ struct OpenMixerApp {
     state: MixerState,
     sample_rate: Option<u32>,
     notice: Option<String>,
+    status_notice: Option<String>,
     saved_input: Option<String>,
     settings_dirty: bool,
     update_state: UpdateState,
-    update_receiver: Option<mpsc::Receiver<UpdateResult>>,
+    update_receiver: Option<mpsc::Receiver<UpdateEvent>>,
+    available_update: Option<UpdateInfo>,
 }
 
-type UpdateResult = Result<Option<(UpdateInfo, PathBuf)>, UpdateError>;
+enum UpdateEvent {
+    Checked(Result<Option<UpdateInfo>, UpdateError>),
+    Downloaded(Result<(UpdateInfo, PathBuf), UpdateError>),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum UpdateState {
-    Idle,
-    Working,
+    Checking,
+    Available,
+    Installing,
     Current,
     Failed,
 }
@@ -97,11 +103,22 @@ enum UpdateState {
 impl UpdateState {
     fn label(self) -> &'static str {
         match self {
-            Self::Idle => "UPDATE",
-            Self::Working => "UPDATING…",
-            Self::Current => "UP TO DATE",
+            Self::Available => "UPDATE",
             Self::Failed => "RETRY UPDATE",
+            Self::Checking | Self::Installing | Self::Current => "",
         }
+    }
+
+    fn starting() -> Self {
+        Self::Checking
+    }
+
+    fn shows_button(self) -> bool {
+        matches!(self, Self::Available | Self::Failed)
+    }
+
+    fn is_informational(self) -> bool {
+        self != Self::Failed
     }
 }
 
@@ -121,13 +138,21 @@ impl OpenMixerApp {
             },
             sample_rate: None,
             notice: None,
+            status_notice: None,
             saved_input: settings.input,
             settings_dirty: false,
-            update_state: UpdateState::Idle,
+            update_state: if cfg!(target_os = "windows") {
+                UpdateState::starting()
+            } else {
+                UpdateState::Current
+            },
             update_receiver: None,
+            available_update: None,
         };
         app.refresh_devices();
         app.persist_settings();
+        #[cfg(target_os = "windows")]
+        app.start_update_check(&context.egui_ctx);
         app
     }
 
@@ -210,41 +235,54 @@ impl OpenMixerApp {
                     AudioStatus::Idle => ("IDLE", MUTED),
                 };
                 ui.label(RichText::new(text).size(10.0).strong().color(color));
-                let update = ui.add_enabled(
-                    cfg!(target_os = "windows") && self.update_state != UpdateState::Working,
-                    egui::Button::new(
-                        RichText::new(self.update_state.label())
-                            .size(9.0)
-                            .color(CYAN),
-                    ),
-                );
-                if update
-                    .on_hover_text(if cfg!(target_os = "windows") {
-                        "Download and install the latest GitHub release"
-                    } else {
-                        "Automatic updates are currently available on Windows"
-                    })
-                    .clicked()
+                if self.update_state.shows_button()
+                    && ui
+                        .button(
+                            RichText::new(self.update_state.label())
+                                .size(9.0)
+                                .color(CYAN),
+                        )
+                        .on_hover_text("Download and install the latest GitHub release")
+                        .clicked()
                 {
-                    self.start_update(ui.ctx());
+                    if self.update_state == UpdateState::Available {
+                        self.start_update_download(ui.ctx());
+                    } else {
+                        self.start_update_check(ui.ctx());
+                    }
                 }
             });
         });
     }
 
-    fn start_update(&mut self, context: &egui::Context) {
+    fn start_update_check(&mut self, context: &egui::Context) {
         let (sender, receiver) = mpsc::channel();
         let context = context.clone();
-        self.update_state = UpdateState::Working;
-        self.notice = Some("Checking GitHub for an OpenMixer update…".into());
+        self.update_state = UpdateState::Checking;
+        self.available_update = None;
+        self.notice = None;
+        self.status_notice = Some("Checking GitHub for an OpenMixer update…".into());
         self.update_receiver = Some(receiver);
         std::thread::spawn(move || {
-            let result = check_for_update(env!("CARGO_PKG_VERSION")).and_then(|available| {
-                available
-                    .map(|update| download_update(&update).map(|path| (update, path)))
-                    .transpose()
-            });
-            let _ = sender.send(result);
+            let result = check_for_update(env!("CARGO_PKG_VERSION"));
+            let _ = sender.send(UpdateEvent::Checked(result));
+            context.request_repaint();
+        });
+    }
+
+    fn start_update_download(&mut self, context: &egui::Context) {
+        let Some(update) = self.available_update.clone() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::channel();
+        let context = context.clone();
+        self.update_state = UpdateState::Installing;
+        self.notice = None;
+        self.status_notice = Some(format!("Downloading OpenMixer v{}…", update.version));
+        self.update_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let result = download_update(&update).map(|path| (update, path));
+            let _ = sender.send(UpdateEvent::Downloaded(result));
             context.request_repaint();
         });
     }
@@ -258,19 +296,22 @@ impl OpenMixerApp {
         };
         self.update_receiver = None;
         match result {
-            Ok(None) => {
+            UpdateEvent::Checked(Ok(None)) => {
                 self.update_state = UpdateState::Current;
-                self.notice = Some(format!(
-                    "OpenMixer v{} is already up to date.",
-                    env!("CARGO_PKG_VERSION")
-                ));
+                self.available_update = None;
+                self.status_notice = None;
             }
-            Ok(Some((update, downloaded))) => {
+            UpdateEvent::Checked(Ok(Some(update))) => {
+                self.update_state = UpdateState::Available;
+                self.status_notice = Some(format!("OpenMixer v{} is available.", update.version));
+                self.available_update = Some(update);
+            }
+            UpdateEvent::Downloaded(Ok((update, downloaded))) => {
                 #[cfg(target_os = "windows")]
                 match openmixer::update::install_downloaded_update(&downloaded) {
                     Ok(()) => {
                         self.audio.stop();
-                        self.notice = Some(format!(
+                        self.status_notice = Some(format!(
                             "Installing OpenMixer v{} and restarting…",
                             update.version
                         ));
@@ -278,6 +319,7 @@ impl OpenMixerApp {
                     }
                     Err(error) => {
                         self.update_state = UpdateState::Failed;
+                        self.status_notice = None;
                         self.notice = Some(error.to_string());
                     }
                 }
@@ -285,12 +327,14 @@ impl OpenMixerApp {
                 {
                     let _ = (update, downloaded);
                     self.update_state = UpdateState::Failed;
+                    self.status_notice = None;
                     self.notice =
                         Some("Automatic updates are currently available on Windows".into());
                 }
             }
-            Err(error) => {
+            UpdateEvent::Checked(Err(error)) | UpdateEvent::Downloaded(Err(error)) => {
                 self.update_state = UpdateState::Failed;
+                self.status_notice = None;
                 self.notice = Some(error.to_string());
             }
         }
@@ -490,6 +534,9 @@ impl eframe::App for OpenMixerApp {
                 ui.add_space(8.0);
                 if let Some(error) = telemetry.error.as_ref().or(self.notice.as_ref()) {
                     ui.label(RichText::new(error).color(RED));
+                } else if let Some(message) = self.status_notice.as_ref() {
+                    debug_assert!(self.update_state.is_informational());
+                    ui.label(RichText::new(message).color(CYAN));
                 } else {
                     ui.horizontal(|ui| {
                         ui.label(
@@ -916,9 +963,25 @@ mod tests {
 
     #[test]
     fn updater_button_labels_each_state_clearly() {
-        assert_eq!(UpdateState::Idle.label(), "UPDATE");
-        assert_eq!(UpdateState::Working.label(), "UPDATING…");
-        assert_eq!(UpdateState::Current.label(), "UP TO DATE");
+        assert_eq!(UpdateState::Available.label(), "UPDATE");
         assert_eq!(UpdateState::Failed.label(), "RETRY UPDATE");
+    }
+
+    #[test]
+    fn startup_checks_automatically_and_hides_current_state() {
+        assert_eq!(UpdateState::starting(), UpdateState::Checking);
+        assert!(!UpdateState::Checking.shows_button());
+        assert!(!UpdateState::Current.shows_button());
+        assert!(UpdateState::Available.shows_button());
+        assert!(UpdateState::Failed.shows_button());
+    }
+
+    #[test]
+    fn non_failure_update_states_are_informational() {
+        assert!(UpdateState::Checking.is_informational());
+        assert!(UpdateState::Available.is_informational());
+        assert!(UpdateState::Installing.is_informational());
+        assert!(UpdateState::Current.is_informational());
+        assert!(!UpdateState::Failed.is_informational());
     }
 }

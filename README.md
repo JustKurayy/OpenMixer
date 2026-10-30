@@ -13,6 +13,7 @@ A small native desktop mixer for monitoring any line input without replacing or 
 - Adds a 28 Hz rumble filter and ±12 dB bass/treble controls.
 - Provides a 0–100% master fader. Overdrive extends it to 300% while peak protection remains active.
 - Shows a stereo program meter plus a calibrated A-weighted loudness estimate with green, orange, and red risk zones.
+- Updates itself from the latest stable GitHub release on Windows without changing your saved mixer settings.
 - Runs as a native Rust application on Windows, macOS, and Linux through CPAL and egui.
 
 The large readout is an **estimated dB(A)** value. A-weighting is applied in the audio engine, but a line input cannot know the gain of your amplifier, speaker sensitivity, listening distance, or the system volume after OpenMixer. The calibration control spans 20–120 dB(A); match it against a real sound meter at your listening position before treating the reading as meaningful. Green is below 85 dB(A), orange is 85–89 dB(A), and red is 90 dB(A) or higher. [NIOSH uses 85 dB(A) averaged over eight hours](https://www.cdc.gov/niosh/noise/about/noise.html) as its recommended exposure limit; loudness and exposure time both matter.
@@ -29,6 +30,18 @@ The large readout is an **estimated dB(A)** value. A-weighting is applied in the
 8. To calibrate dB(A), play steady audio and adjust the calibration slider until OpenMixer matches a sound meter placed at your listening position.
 
 If the noise exists before playback starts, also check the cable, PC input gain, and audio interface. Try keeping connected equipment on the same power strip, and test a different line input or shielded cable. Software can reduce steady hum and hiss, but it cannot repair clipping or remove the electrical cause of a ground loop.
+
+## Install on Windows
+
+Download the current release from the [OpenMixer releases page](https://github.com/JustKurayy/OpenMixer/releases/latest):
+
+- **Setup EXE** — recommended. Installs OpenMixer for your Windows account, adds it to the Start menu, and provides a normal uninstaller. It does not require administrator access.
+- **Portable ZIP** — contains `openmixer.exe`, this README, and the GPL license. Extract it anywhere writable and run the EXE directly.
+- **Loose EXE** — the same standalone program without the accompanying files. This stable asset name is also what the in-app updater downloads.
+
+OpenMixer checks GitHub quietly at startup. The **UPDATE** button stays hidden when the app is current and appears only when a newer stable release is ready; clicking it downloads the replacement, closes OpenMixer, updates its own EXE, and restarts. If the check fails, a **RETRY UPDATE** button appears. The installed and portable editions use the same updater, and `.openmixer/settings.ini` is left untouched. Automatic updating is currently available on Windows; macOS and Linux builds still require a manual update.
+
+OpenMixer is not currently code-signed, so Windows SmartScreen may show an unknown-publisher warning on first launch. The release page includes SHA-256 digests for manual verification.
 
 ## Run from source
 
@@ -72,7 +85,7 @@ selected line input
 
 OpenMixer currently requires the selected devices to share a 48 kHz or 44.1 kHz mode and supports `f32`, `i16`, and `u16` sample formats. It uses about 50 ms of safety buffering plus the spectral window; actual end-to-end latency depends on the hardware and operating system and has not been measured here. Device disconnection, buffer underruns, and overflows are shown in the interface.
 
-The Windows build and UI were verified on the development machine. macOS and Linux use the same cross-platform code but still need hardware testing. Crackle restoration, recording, plugins, multiple buses, virtual audio devices, installers, and automatic updates are intentionally outside this small first release.
+The Windows build and UI were verified on the development machine. macOS and Linux use the same cross-platform audio code but still need hardware testing. Crackle restoration, recording, plugins, multiple buses, and virtual audio devices are intentionally outside this small release.
 
 On the Windows development machine, the stripped release executable measured 8.0 MiB. With the interface open and audio stopped, one three-second sample measured 74.1 MiB working set and 2.6% of one CPU core. These are a single-machine idle snapshot, not cross-platform guarantees; active DSP usage still needs measurement with the actual line input.
 
@@ -83,6 +96,12 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
+```
+
+To recreate the Windows icon after editing `assets/openmixer.svg`, install Python, Pillow, and CairoSVG, then run `python scripts/build-icon.py`. To build all Windows release artifacts, install Inno Setup 6 and run:
+
+```powershell
+.\scripts\package-windows.ps1
 ```
 
 Licensed under the [GNU General Public License v3](LICENSE).
