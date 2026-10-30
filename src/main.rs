@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke, Vec2};
 use openmixer::{
     audio::{AudioEngine, AudioStatus, DeviceList, TelemetrySnapshot},
@@ -55,16 +57,19 @@ struct OpenMixerApp {
     state: MixerState,
     sample_rate: Option<u32>,
     notice: Option<String>,
+    saved_input: Option<String>,
 }
 
 impl OpenMixerApp {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
         configure_style(&context.egui_ctx);
+        let saved_input = settings_path().as_deref().and_then(load_input);
         let mut app = Self {
             audio: AudioEngine::new(),
             state: MixerState::default(),
             sample_rate: None,
             notice: None,
+            saved_input,
         };
         app.refresh_devices();
         app
@@ -74,10 +79,8 @@ impl OpenMixerApp {
         match AudioEngine::devices() {
             Ok(devices) => {
                 self.state.devices = devices;
-                self.state.input_index = self
-                    .state
-                    .input_index
-                    .min(self.state.devices.inputs.len().saturating_sub(1));
+                self.state.input_index =
+                    preferred_input_index(&self.state.devices.inputs, self.saved_input.as_deref());
                 self.notice = None;
             }
             Err(error) => self.notice = Some(error),
@@ -91,9 +94,9 @@ impl OpenMixerApp {
                     .font(FontId::proportional(22.0))
                     .strong(),
             );
-            ui.label(RichText::new("VINYL CONSOLE").size(10.0).color(MUTED));
             ui.separator();
             small_label(ui, "LINE INPUT");
+            let previous_input = self.state.input_index;
             egui::ComboBox::from_id_salt("input-device")
                 .width(300.0)
                 .selected_text(selected(
@@ -106,6 +109,21 @@ impl OpenMixerApp {
                         ui.selectable_value(&mut self.state.input_index, index, name);
                     }
                 });
+            if self.state.input_index != previous_input
+                && let Some(name) = self
+                    .state
+                    .devices
+                    .inputs
+                    .get(self.state.input_index)
+                    .cloned()
+            {
+                self.saved_input = Some(name.clone());
+                if let Some(path) = settings_path()
+                    && let Err(error) = save_input(&path, &name)
+                {
+                    self.notice = Some(format!("Could not remember input: {error}"));
+                }
+            }
             if ui.small_button("REFRESH").clicked() {
                 self.refresh_devices();
             }
@@ -495,6 +513,32 @@ fn selected<'a>(items: &'a [String], index: usize, empty: &'static str) -> &'a s
     items.get(index).map(String::as_str).unwrap_or(empty)
 }
 
+fn preferred_input_index(inputs: &[String], saved: Option<&str>) -> usize {
+    saved
+        .and_then(|name| inputs.iter().position(|input| input == name))
+        .unwrap_or(0)
+}
+
+fn settings_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".openmixer").join("input"))
+}
+
+fn load_input(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+fn save_input(path: &std::path::Path, name: &str) -> std::io::Result<()> {
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    std::fs::write(path, name)
+}
+
 fn configure_style(context: &egui::Context) {
     let mut style = (*context.global_style()).clone();
     style.spacing.item_spacing = Vec2::new(7.0, 7.0);
@@ -566,5 +610,22 @@ mod tests {
             displayed_dba(AudioStatus::Running, -20.0, 100.0),
             Some(80.0)
         );
+    }
+
+    #[test]
+    fn saved_input_is_restored_by_device_name() {
+        let inputs = vec!["Microphone".into(), "Line In".into()];
+        assert_eq!(preferred_input_index(&inputs, Some("Line In")), 1);
+        assert_eq!(preferred_input_index(&inputs, Some("Missing")), 0);
+    }
+
+    #[test]
+    fn selected_input_round_trips_through_settings_file() {
+        let directory =
+            std::env::temp_dir().join(format!("openmixer-settings-test-{}", std::process::id()));
+        let path = directory.join("input");
+        save_input(&path, "Line In (USB Audio)").unwrap();
+        assert_eq!(load_input(&path).as_deref(), Some("Line In (USB Audio)"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

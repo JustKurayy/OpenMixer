@@ -2,7 +2,7 @@
 name = "openmixer"
 version = "0.1.0"
 edition = "2024"
-description = "A small cross-platform line-input mixer for vinyl playback"
+description = "A small cross-platform mixer for monitoring and cleaning line input"
 license = "GPL-3.0-only"
 
 [dependencies]
