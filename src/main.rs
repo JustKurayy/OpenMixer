@@ -14,6 +14,7 @@ const GREEN: Color32 = Color32::from_rgb(69, 196, 111);
 const ORANGE: Color32 = Color32::from_rgb(238, 158, 57);
 const RED: Color32 = Color32::from_rgb(232, 75, 69);
 
+#[derive(Default)]
 struct MixerState {
     devices: DeviceList,
     input_index: usize,
@@ -21,25 +22,31 @@ struct MixerState {
     controls: DspControls,
 }
 
-impl Default for MixerState {
-    fn default() -> Self {
-        Self { devices: DeviceList::default(), input_index: 0, output_index: 0, controls: DspControls::default() }
-    }
-}
-
 impl MixerState {
     fn set_overdrive(&mut self, enabled: bool) {
         self.controls.overdrive = enabled;
-        if !enabled { self.controls.gain_percent = self.controls.gain_percent.min(100.0); }
+        if !enabled {
+            self.controls.gain_percent = self.controls.gain_percent.min(100.0);
+        }
     }
 
     fn can_start(&self, status: AudioStatus) -> bool {
-        status == AudioStatus::Idle && !self.devices.inputs.is_empty() && !self.devices.outputs.is_empty()
+        status == AudioStatus::Idle
+            && !self.devices.inputs.is_empty()
+            && !self.devices.outputs.is_empty()
+    }
+
+    fn can_stop(status: AudioStatus) -> bool {
+        matches!(status, AudioStatus::Running | AudioStatus::Fault)
     }
 }
 
 fn meter_color(level_dbfs: f32) -> Color32 {
-    match meter_band(level_dbfs) { MeterBand::Green => GREEN, MeterBand::Orange => ORANGE, MeterBand::Red => RED }
+    match meter_band(level_dbfs) {
+        MeterBand::Green => GREEN,
+        MeterBand::Orange => ORANGE,
+        MeterBand::Red => RED,
+    }
 }
 
 struct OpenMixerApp {
@@ -52,7 +59,12 @@ struct OpenMixerApp {
 impl OpenMixerApp {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
         configure_style(&context.egui_ctx);
-        let mut app = Self { audio: AudioEngine::new(), state: MixerState::default(), sample_rate: None, notice: None };
+        let mut app = Self {
+            audio: AudioEngine::new(),
+            state: MixerState::default(),
+            sample_rate: None,
+            notice: None,
+        };
         app.refresh_devices();
         app
     }
@@ -61,8 +73,14 @@ impl OpenMixerApp {
         match AudioEngine::devices() {
             Ok(devices) => {
                 self.state.devices = devices;
-                self.state.input_index = self.state.input_index.min(self.state.devices.inputs.len().saturating_sub(1));
-                self.state.output_index = self.state.output_index.min(self.state.devices.outputs.len().saturating_sub(1));
+                self.state.input_index = self
+                    .state
+                    .input_index
+                    .min(self.state.devices.inputs.len().saturating_sub(1));
+                self.state.output_index = self
+                    .state
+                    .output_index
+                    .min(self.state.devices.outputs.len().saturating_sub(1));
                 self.notice = None;
             }
             Err(error) => self.notice = Some(error),
@@ -74,23 +92,64 @@ impl OpenMixerApp {
             ui.label(section_label("SOURCE"));
             ui.add_space(12.0);
             ui.label(RichText::new("Listen to").color(MUTED));
-            egui::ComboBox::from_id_salt("input-device").width(270.0)
-                .selected_text(selected(&self.state.devices.inputs, self.state.input_index, "No capture devices"))
-                .show_ui(ui, |ui| for (index, name) in self.state.devices.inputs.iter().enumerate() { ui.selectable_value(&mut self.state.input_index, index, name); });
+            egui::ComboBox::from_id_salt("input-device")
+                .width(225.0)
+                .selected_text(selected(
+                    &self.state.devices.inputs,
+                    self.state.input_index,
+                    "No capture devices",
+                ))
+                .show_ui(ui, |ui| {
+                    for (index, name) in self.state.devices.inputs.iter().enumerate() {
+                        ui.selectable_value(&mut self.state.input_index, index, name);
+                    }
+                });
             ui.label(RichText::new("Play through").color(MUTED));
-            egui::ComboBox::from_id_salt("output-device").width(270.0)
-                .selected_text(selected(&self.state.devices.outputs, self.state.output_index, "No playback devices"))
-                .show_ui(ui, |ui| for (index, name) in self.state.devices.outputs.iter().enumerate() { ui.selectable_value(&mut self.state.output_index, index, name); });
-            if ui.button("↻ Refresh").on_hover_text("Scan the operating system for audio devices again").clicked() { self.refresh_devices(); }
+            egui::ComboBox::from_id_salt("output-device")
+                .width(225.0)
+                .selected_text(selected(
+                    &self.state.devices.outputs,
+                    self.state.output_index,
+                    "No playback devices",
+                ))
+                .show_ui(ui, |ui| {
+                    for (index, name) in self.state.devices.outputs.iter().enumerate() {
+                        ui.selectable_value(&mut self.state.output_index, index, name);
+                    }
+                });
+            if ui
+                .button("REFRESH")
+                .on_hover_text("Scan the operating system for audio devices again")
+                .clicked()
+            {
+                self.refresh_devices();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                match status {
-                    AudioStatus::Running => if ui.add(egui::Button::new(RichText::new("■  STOP").color(RED))).clicked() { self.audio.stop(); self.sample_rate = None; },
-                    _ => if ui.add_enabled(self.state.can_start(status), egui::Button::new(RichText::new("▶  START").color(TEAL))).clicked() {
-                        match self.audio.start(self.state.input_index, self.state.output_index) {
-                            Ok(rate) => { self.sample_rate = Some(rate); self.notice = None; }
-                            Err(error) => self.notice = Some(error),
+                if MixerState::can_stop(status) {
+                    if ui
+                        .add(egui::Button::new(RichText::new("STOP").color(RED)))
+                        .clicked()
+                    {
+                        self.audio.stop();
+                        self.sample_rate = None;
+                    }
+                } else if ui
+                    .add_enabled(
+                        self.state.can_start(status),
+                        egui::Button::new(RichText::new("START").color(TEAL)),
+                    )
+                    .clicked()
+                {
+                    match self
+                        .audio
+                        .start(self.state.input_index, self.state.output_index)
+                    {
+                        Ok(rate) => {
+                            self.sample_rate = Some(rate);
+                            self.notice = None;
                         }
-                    },
+                        Err(error) => self.notice = Some(error),
+                    }
                 }
             });
         });
@@ -98,7 +157,8 @@ impl OpenMixerApp {
 
     fn cleanup(&mut self, ui: &mut egui::Ui, status: AudioStatus, telemetry: &TelemetrySnapshot) {
         panel(ui, "NOISE CLEANUP", |ui| {
-            ui.checkbox(&mut self.state.controls.low_cut, "Low cut · 28 Hz").on_hover_text("Reduces sub-bass rumble without removing ordinary bass notes");
+            ui.checkbox(&mut self.state.controls.low_cut, "Low cut · 28 Hz")
+                .on_hover_text("Reduces sub-bass rumble without removing ordinary bass notes");
             ui.add_space(10.0);
             ui.label(control_label("MAINS HUM"));
             ui.horizontal(|ui| {
@@ -108,18 +168,44 @@ impl OpenMixerApp {
             });
             ui.add_space(14.0);
             ui.label(control_label("LEARNED REDUCTION"));
-            ui.add(egui::Slider::new(&mut self.state.controls.noise_reduction, 0.0..=1.0).show_value(false));
+            ui.add(
+                egui::Slider::new(&mut self.state.controls.noise_reduction, 0.0..=1.0)
+                    .show_value(false),
+            );
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{}%", (self.state.controls.noise_reduction * 100.0).round())).color(CREAM));
+                ui.label(
+                    RichText::new(format!(
+                        "{}%",
+                        (self.state.controls.noise_reduction * 100.0).round()
+                    ))
+                    .color(CREAM),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let learning = telemetry.learning_progress < 1.0;
-                    if ui.add_enabled(status == AudioStatus::Running && !learning, egui::Button::new(if learning { "Learning…" } else { "Learn idle noise" }))
-                        .on_hover_text("Stop the turntable and capture two seconds of steady electrical noise").clicked() { self.audio.learn_noise(2.0); }
+                    if ui
+                        .add_enabled(
+                            status == AudioStatus::Running && !learning,
+                            egui::Button::new(if learning {
+                                "Learning…"
+                            } else {
+                                "Learn idle noise"
+                            }),
+                        )
+                        .on_hover_text(
+                            "Stop the turntable and capture two seconds of steady electrical noise",
+                        )
+                        .clicked()
+                    {
+                        self.audio.learn_noise(2.0);
+                    }
                 });
             });
-            if telemetry.learning_progress < 1.0 { ui.add(egui::ProgressBar::new(telemetry.learning_progress).fill(TEAL)); }
+            if telemetry.learning_progress < 1.0 {
+                ui.add(egui::ProgressBar::new(telemetry.learning_progress).fill(TEAL));
+            }
             ui.add_space(12.0);
-            ui.checkbox(&mut self.state.controls.cleanup_bypassed, "Bypass cleanup").on_hover_text("Compare filters at the same master level");
+            ui.checkbox(&mut self.state.controls.cleanup_bypassed, "Bypass cleanup")
+                .on_hover_text("Compare filters at the same master level");
         });
     }
 
@@ -129,24 +215,43 @@ impl OpenMixerApp {
             ui.add_space(24.0);
             tone_control(ui, "TREBLE", &mut self.state.controls.treble_db);
             ui.add_space(24.0);
-            ui.label(RichText::new("Designed for music, not speech").color(MUTED).small());
-            ui.label(RichText::new("Strong cleanup may soften quiet detail.").color(MUTED).small());
+            ui.label(
+                RichText::new("Designed for music, not speech")
+                    .color(MUTED)
+                    .small(),
+            );
+            ui.label(
+                RichText::new("Strong cleanup may soften quiet detail.")
+                    .color(MUTED)
+                    .small(),
+            );
         });
     }
 
     fn master(&mut self, ui: &mut egui::Ui, telemetry: &TelemetrySnapshot) {
         panel(ui, "MASTER OUTPUT", |ui| {
-            ui.horizontal(|ui| {
-                stereo_meter(ui, "INPUT", telemetry.input_dbfs);
-                ui.add_space(18.0);
-                ui.vertical_centered(|ui| {
-                    let max = if self.state.controls.overdrive { 300.0 } else { 100.0 };
+            ui.columns(3, |columns| {
+                stereo_meter(&mut columns[0], "INPUT", telemetry.input_dbfs);
+                columns[1].vertical_centered(|ui| {
+                    let max = if self.state.controls.overdrive {
+                        300.0
+                    } else {
+                        100.0
+                    };
                     ui.label(control_label("LEVEL"));
-                    ui.add_sized([42.0, 245.0], egui::Slider::new(&mut self.state.controls.gain_percent, 0.0..=max).vertical().show_value(false));
-                    ui.label(RichText::new(format!("{:.0}%", self.state.controls.gain_percent)).color(CREAM).strong());
+                    ui.add_sized(
+                        [42.0, 215.0],
+                        egui::Slider::new(&mut self.state.controls.gain_percent, 0.0..=max)
+                            .vertical()
+                            .show_value(false),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:.0}%", self.state.controls.gain_percent))
+                            .color(CREAM)
+                            .strong(),
+                    );
                 });
-                ui.add_space(18.0);
-                stereo_meter(ui, "OUTPUT", telemetry.output_dbfs);
+                stereo_meter(&mut columns[2], "OUTPUT", telemetry.output_dbfs);
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -170,7 +275,9 @@ impl eframe::App for OpenMixerApp {
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
         self.audio.set_controls(self.state.controls);
-        if status == AudioStatus::Running { context.request_repaint_after(std::time::Duration::from_millis(33)); }
+        if status == AudioStatus::Running {
+            context.request_repaint_after(std::time::Duration::from_millis(33));
+        }
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BACKGROUND).inner_margin(egui::Margin::same(20))).show(root, |ui| {
             egui::Frame::new().fill(BACKGROUND).inner_margin(egui::Margin::symmetric(4, 8)).show(ui, |ui| {
@@ -180,7 +287,7 @@ impl eframe::App for OpenMixerApp {
                         ui.label(RichText::new("VINYL INPUT CONSOLE").color(MUTED).size(11.0));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let (text, color) = match status { AudioStatus::Running => (format!("●  MONITORING  ·  {} kHz", self.sample_rate.unwrap_or(0) / 1_000), GREEN), AudioStatus::Fault => ("●  AUDIO FAULT".into(), RED), AudioStatus::Idle => ("●  IDLE".into(), MUTED) };
+                        let (text, color) = match status { AudioStatus::Running => (format!("MONITORING  /  {} kHz", self.sample_rate.unwrap_or(0) / 1_000), GREEN), AudioStatus::Fault => ("AUDIO FAULT".into(), RED), AudioStatus::Idle => ("IDLE".into(), MUTED) };
                         ui.label(RichText::new(text).color(color).strong());
                     });
                 });
@@ -207,23 +314,36 @@ impl eframe::App for OpenMixerApp {
     }
 }
 
-fn selected<'a>(items: &'a [String], index: usize, empty: &'static str) -> &'a str { items.get(index).map(String::as_str).unwrap_or(empty) }
-fn section_label(text: &str) -> RichText { RichText::new(text).color(TEAL).strong().size(11.0) }
-fn control_label(text: &str) -> RichText { RichText::new(text).color(MUTED).strong().size(10.0) }
+fn selected<'a>(items: &'a [String], index: usize, empty: &'static str) -> &'a str {
+    items.get(index).map(String::as_str).unwrap_or(empty)
+}
+fn section_label(text: &str) -> RichText {
+    RichText::new(text).color(TEAL).strong().size(11.0)
+}
+fn control_label(text: &str) -> RichText {
+    RichText::new(text).color(MUTED).strong().size(10.0)
+}
 
 fn panel(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new().fill(PANEL).stroke(Stroke::new(1.0, PANEL_RAISED)).corner_radius(8).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
-        ui.set_min_height(385.0);
-        ui.label(section_label(title));
-        ui.add_space(18.0);
-        body(ui);
-    });
+    egui::Frame::new()
+        .fill(PANEL)
+        .stroke(Stroke::new(1.0, PANEL_RAISED))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::same(18))
+        .show(ui, |ui| {
+            ui.set_min_height(355.0);
+            ui.label(section_label(title));
+            ui.add_space(18.0);
+            body(ui);
+        });
 }
 
 fn tone_control(ui: &mut egui::Ui, label: &str, value: &mut f32) {
     ui.horizontal(|ui| {
         ui.label(control_label(label));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| { ui.label(RichText::new(format!("{:+.1} dB", *value)).color(CREAM)); });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(format!("{:+.1} dB", *value)).color(CREAM));
+        });
     });
     ui.add(egui::Slider::new(value, -12.0..=12.0).show_value(false));
 }
@@ -231,23 +351,47 @@ fn tone_control(ui: &mut egui::Ui, label: &str, value: &mut f32) {
 fn stereo_meter(ui: &mut egui::Ui, title: &str, levels: [f32; 2]) {
     ui.vertical_centered(|ui| {
         ui.label(control_label(title));
-        ui.horizontal(|ui| { level_meter(ui, levels[0], "L"); level_meter(ui, levels[1], "R"); });
-        ui.label(RichText::new(format!("{:.1} dB", levels[0].max(levels[1]))).color(meter_color(levels[0].max(levels[1]))).monospace().size(11.0));
+        ui.horizontal(|ui| {
+            level_meter(ui, levels[0], "L");
+            level_meter(ui, levels[1], "R");
+        });
+        ui.label(
+            RichText::new(format!("{:.1} dB", levels[0].max(levels[1])))
+                .color(meter_color(levels[0].max(levels[1])))
+                .monospace()
+                .size(11.0),
+        );
     });
 }
 
 fn level_meter(ui: &mut egui::Ui, level: f32, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 245.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(18.0, 215.0), egui::Sense::hover());
     let segments = 30;
     for segment in 0..segments {
         let low = -60.0 + segment as f32 * 2.0;
         let y1 = egui::lerp(rect.bottom()..=rect.top(), segment as f32 / segments as f32);
-        let y2 = egui::lerp(rect.bottom()..=rect.top(), (segment + 1) as f32 / segments as f32);
-        let segment_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), y2 + 1.0), egui::pos2(rect.right(), y1 - 1.0));
-        let color = if level >= low { meter_color(low) } else { Color32::from_rgb(48, 53, 53) };
+        let y2 = egui::lerp(
+            rect.bottom()..=rect.top(),
+            (segment + 1) as f32 / segments as f32,
+        );
+        let segment_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), y2 + 1.0),
+            egui::pos2(rect.right(), y1 - 1.0),
+        );
+        let color = if level >= low {
+            meter_color(low)
+        } else {
+            Color32::from_rgb(48, 53, 53)
+        };
         ui.painter().rect_filled(segment_rect, 1.0, color);
     }
-    ui.put(egui::Rect::from_min_size(egui::pos2(rect.left(), rect.bottom() + 2.0), Vec2::new(18.0, 16.0)), egui::Label::new(RichText::new(label).color(MUTED).size(9.0)));
+    ui.put(
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.bottom() + 2.0),
+            Vec2::new(18.0, 16.0),
+        ),
+        egui::Label::new(RichText::new(label).color(MUTED).size(9.0)),
+    );
 }
 
 fn configure_style(context: &egui::Context) {
@@ -269,7 +413,12 @@ fn configure_style(context: &egui::Context) {
 fn main() -> eframe::Result {
     eframe::run_native(
         "OpenMixer",
-        eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1120.0, 640.0]).with_min_inner_size([900.0, 590.0]), ..Default::default() },
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1240.0, 680.0])
+                .with_min_inner_size([980.0, 620.0]),
+            ..Default::default()
+        },
         Box::new(|context| Ok(Box::new(OpenMixerApp::new(context)))),
     )
 }
@@ -300,6 +449,13 @@ mod tests {
         state.devices.outputs.push("Speakers".into());
         assert!(state.can_start(AudioStatus::Idle));
         assert!(!state.can_start(AudioStatus::Running));
+    }
+
+    #[test]
+    fn backend_fault_still_exposes_stop() {
+        assert!(MixerState::can_stop(AudioStatus::Fault));
+        assert!(MixerState::can_stop(AudioStatus::Running));
+        assert!(!MixerState::can_stop(AudioStatus::Idle));
     }
 
     #[test]

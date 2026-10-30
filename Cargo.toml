@@ -3,11 +3,11 @@ name = "openmixer"
 version = "0.1.0"
 edition = "2024"
 description = "A small cross-platform line-input mixer for vinyl playback"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [dependencies]
 cpal = "0.18.2"
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "glow", "wayland", "x11"] }
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 ringbuf = "0.6.0"
 rustfft = "6.4.1"
 
