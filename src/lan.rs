@@ -24,9 +24,7 @@ pub struct AudioTap {
 
 impl AudioTap {
     pub fn push(&self, frame: [f32; 2]) -> bool {
-        self.sender
-            .try_send(frame.map(float_to_pcm))
-            .is_ok()
+        self.sender.try_send(frame.map(float_to_pcm)).is_ok()
     }
 }
 
@@ -90,7 +88,8 @@ impl AuthState {
         }
 
         let mut random = [0_u8; 17];
-        getrandom::fill(&mut random).map_err(|error| format!("Random generator failed: {error}"))?;
+        getrandom::fill(&mut random)
+            .map_err(|error| format!("Random generator failed: {error}"))?;
         let request = PairRequest {
             id: hex(&random[1..]),
             code: 10 + random[0] % 90,
@@ -102,12 +101,7 @@ impl AuthState {
         Ok(request)
     }
 
-    fn verify(
-        &mut self,
-        id: &str,
-        code: u8,
-        now: Instant,
-    ) -> Result<String, PairingError> {
+    fn verify(&mut self, id: &str, code: u8, now: Instant) -> Result<String, PairingError> {
         let Some(request) = self.pending.get_mut(id) else {
             return Err(PairingError::UnknownRequest);
         };
@@ -295,14 +289,8 @@ fn run_listener(
                 let clients = Arc::clone(&clients);
                 let stop = Arc::clone(&stop);
                 thread::spawn(move || {
-                    let _ = handle_connection(
-                        stream,
-                        peer.ip(),
-                        sample_rate,
-                        shared,
-                        clients,
-                        stop,
-                    );
+                    let _ =
+                        handle_connection(stream, peer.ip(), sample_rate, shared, clients, stop);
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -337,14 +325,28 @@ fn handle_connection(
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = match read_request(&mut stream) {
         Ok(request) => request,
-        Err(_) => return send_text(&mut stream, "400 Bad Request", "text/plain", "Bad request", ""),
+        Err(_) => {
+            return send_text(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain",
+                "Bad request",
+                "",
+            );
+        }
     };
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
             let mut state = shared.lock().unwrap();
             if state.auth.is_authorized(&request.session) {
-                send_text(&mut stream, "200 OK", "text/html; charset=utf-8", PLAYER_HTML, "")
+                send_text(
+                    &mut stream,
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    PLAYER_HTML,
+                    "",
+                )
             } else {
                 match state.auth.begin_pairing(peer, Instant::now()) {
                     Ok(pairing) => {
@@ -397,7 +399,13 @@ fn handle_connection(
                         PairingError::UnknownRequest => "Pairing request is no longer valid",
                     };
                     let page = pairing_page(id, message);
-                    send_text(&mut stream, "403 Forbidden", "text/html; charset=utf-8", &page, "")
+                    send_text(
+                        &mut stream,
+                        "403 Forbidden",
+                        "text/html; charset=utf-8",
+                        &page,
+                        "",
+                    )
                 }
             }
         }
@@ -407,7 +415,13 @@ fn handle_connection(
                 .map(|state| state.auth.is_authorized(&request.session))
                 .unwrap_or(false);
             if !authorized {
-                return send_text(&mut stream, "401 Unauthorized", "text/plain", "Pair first", "");
+                return send_text(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "Pair first",
+                    "",
+                );
             }
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -609,11 +623,7 @@ mod tests {
         let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let expired = auth.begin_pairing(peer, now).unwrap();
         assert_eq!(
-            auth.verify(
-                &expired.id,
-                expired.code,
-                now + Duration::from_secs(61)
-            ),
+            auth.verify(&expired.id, expired.code, now + Duration::from_secs(61)),
             Err(PairingError::Expired)
         );
 
@@ -641,7 +651,10 @@ mod tests {
         assert_eq!(&header[0..4], b"RIFF");
         assert_eq!(&header[8..12], b"WAVE");
         assert_eq!(u16::from_le_bytes([header[22], header[23]]), 2);
-        assert_eq!(u32::from_le_bytes(header[24..28].try_into().unwrap()), 48_000);
+        assert_eq!(
+            u32::from_le_bytes(header[24..28].try_into().unwrap()),
+            48_000
+        );
         assert_eq!(u16::from_le_bytes([header[34], header[35]]), 16);
         assert_eq!(&header[36..40], b"data");
     }

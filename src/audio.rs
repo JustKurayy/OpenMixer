@@ -1,4 +1,5 @@
 use crate::dsp::{DspControls, DspEngine, dbfs};
+use crate::lan::AudioTap;
 use cpal::{
     Device, SampleFormat, SizedSample, Stream, StreamConfig, SupportedStreamConfig,
     SupportedStreamConfigRange,
@@ -135,6 +136,7 @@ pub struct AudioEngine {
     telemetry: Arc<SharedTelemetry>,
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
+    lan_tap: Option<AudioTap>,
 }
 
 impl Default for AudioEngine {
@@ -145,11 +147,20 @@ impl Default for AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> Self {
+        Self::from_lan_tap(None)
+    }
+
+    pub fn with_lan_tap(tap: AudioTap) -> Self {
+        Self::from_lan_tap(Some(tap))
+    }
+
+    fn from_lan_tap(lan_tap: Option<AudioTap>) -> Self {
         Self {
             controls: Arc::new(AtomicControls::new(DspControls::default())),
             telemetry: Arc::new(SharedTelemetry::default()),
             input_stream: None,
             output_stream: None,
+            lan_tap,
         }
     }
 
@@ -237,6 +248,7 @@ impl AudioEngine {
                 producer,
                 Arc::clone(&self.controls),
                 Arc::clone(&self.telemetry),
+                self.lan_tap.clone(),
             )?,
             SampleFormat::I16 => build_input::<i16, _>(
                 &input,
@@ -244,6 +256,7 @@ impl AudioEngine {
                 producer,
                 Arc::clone(&self.controls),
                 Arc::clone(&self.telemetry),
+                self.lan_tap.clone(),
             )?,
             SampleFormat::U16 => build_input::<u16, _>(
                 &input,
@@ -251,6 +264,7 @@ impl AudioEngine {
                 producer,
                 Arc::clone(&self.controls),
                 Arc::clone(&self.telemetry),
+                self.lan_tap.clone(),
             )?,
             format => return Err(format!("Input sample format {format} is not supported yet")),
         };
@@ -457,6 +471,7 @@ fn build_input<T, P>(
     mut producer: P,
     controls: Arc<AtomicControls>,
     telemetry: Arc<SharedTelemetry>,
+    lan_tap: Option<AudioTap>,
 ) -> Result<Stream, String>
 where
     T: InputSample,
@@ -478,6 +493,9 @@ where
                 for frame in data.chunks_exact(channels) {
                     let output = dsp.process_frame(input_frame(frame, 0, channels), &control);
                     push_frame(&mut producer, output, &telemetry.overflows);
+                    if let Some(tap) = &lan_tap {
+                        let _ = tap.push(output);
+                    }
                 }
                 let levels = dsp.levels();
                 for channel in 0..2 {

@@ -4,6 +4,7 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use openmixer::{
     audio::{AudioEngine, AudioStatus, DeviceList, TelemetrySnapshot},
     dsp::{DspControls, MeterBand, dba_meter_band, estimated_dba},
+    lan::LanServer,
     update::{UpdateError, UpdateInfo, check_for_update, download_update},
 };
 use std::{path::PathBuf, sync::mpsc};
@@ -75,6 +76,7 @@ impl Default for AppSettings {
 
 struct OpenMixerApp {
     audio: AudioEngine,
+    lan: LanServer,
     state: MixerState,
     sample_rate: Option<u32>,
     notice: Option<String>,
@@ -129,8 +131,10 @@ impl OpenMixerApp {
             .as_deref()
             .map(load_settings)
             .unwrap_or_default();
+        let (lan, lan_tap) = LanServer::new();
         let mut app = Self {
-            audio: AudioEngine::new(),
+            audio: AudioEngine::with_lan_tap(lan_tap),
+            lan,
             state: MixerState {
                 controls: settings.controls,
                 full_scale_dba: settings.full_scale_dba,
@@ -212,6 +216,7 @@ impl OpenMixerApp {
                         .clicked()
                     {
                         self.audio.stop();
+                        self.lan.stop();
                         self.sample_rate = None;
                     }
                 } else if ui
@@ -311,6 +316,7 @@ impl OpenMixerApp {
                 match openmixer::update::install_downloaded_update(&downloaded) {
                     Ok(()) => {
                         self.audio.stop();
+                        self.lan.stop();
                         self.status_notice = Some(format!(
                             "Installing OpenMixer v{} and restarting…",
                             update.version
@@ -497,6 +503,72 @@ impl OpenMixerApp {
             ui.label(RichText::new(warning).size(11.0).strong().color(color));
         });
     }
+
+    fn lan_bar(&mut self, ui: &mut egui::Ui, status: AudioStatus) {
+        let snapshot = self.lan.snapshot();
+        egui::Frame::new()
+            .fill(STRIP)
+            .stroke(Stroke::new(1.0, LINE))
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let button = ui.add_enabled(
+                        snapshot.running || can_start_lan(status, self.sample_rate),
+                        egui::Button::new(
+                            RichText::new(lan_button_label(snapshot.running))
+                                .size(9.0)
+                                .strong()
+                                .color(if snapshot.running { RED } else { CYAN }),
+                        ),
+                    );
+                    if button
+                        .on_hover_text("Stream processed audio to devices on this local network")
+                        .clicked()
+                    {
+                        if snapshot.running {
+                            self.lan.stop();
+                        } else if let Some(sample_rate) = self.sample_rate
+                            && let Err(error) = self.lan.start(sample_rate)
+                        {
+                            self.notice = Some(error);
+                        }
+                    }
+
+                    if let Some(url) = snapshot.url.as_ref() {
+                        ui.label(RichText::new(url).size(10.0).color(TEXT));
+                        if ui.small_button("COPY").clicked() {
+                            ui.ctx().copy_text(url.clone());
+                        }
+                        small_label(ui, &format!("{} CONNECTED", snapshot.clients));
+                    } else {
+                        ui.label(
+                            RichText::new("PRIVATE LAN AUDIO SERVER")
+                                .size(9.0)
+                                .color(MUTED),
+                        );
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(pending) = snapshot.pending.as_ref() {
+                            ui.label(
+                                RichText::new(format!("PAIR CODE  {:02}", pending.code))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(ORANGE),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} REQUESTED ACCESS", pending.address))
+                                    .size(9.0)
+                                    .color(MUTED),
+                            );
+                        }
+                    });
+                });
+                if let Some(error) = snapshot.error.as_ref() {
+                    ui.label(RichText::new(error).size(9.0).color(RED));
+                }
+            });
+    }
 }
 
 impl eframe::App for OpenMixerApp {
@@ -506,9 +578,14 @@ impl eframe::App for OpenMixerApp {
         self.poll_update(&ctx);
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
+        if status != AudioStatus::Running && self.lan.snapshot().running {
+            self.lan.stop();
+        }
         self.audio.set_controls(self.state.controls);
         if status == AudioStatus::Running {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        } else if self.lan.snapshot().running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         egui::CentralPanel::default()
             .frame(
@@ -532,6 +609,8 @@ impl eframe::App for OpenMixerApp {
                     });
                 });
                 ui.add_space(8.0);
+                self.lan_bar(ui, status);
+                ui.add_space(6.0);
                 if let Some(error) = telemetry.error.as_ref().or(self.notice.as_ref()) {
                     ui.label(RichText::new(error).color(RED));
                 } else if let Some(message) = self.status_notice.as_ref() {
@@ -724,6 +803,18 @@ fn displayed_dba(status: AudioStatus, weighted_dbfs: f32, calibration: f32) -> O
     (status == AudioStatus::Running).then(|| estimated_dba(weighted_dbfs, calibration))
 }
 
+fn lan_button_label(running: bool) -> &'static str {
+    if running {
+        "STOP LAN LISTEN"
+    } else {
+        "START LAN LISTEN"
+    }
+}
+
+fn can_start_lan(status: AudioStatus, sample_rate: Option<u32>) -> bool {
+    status == AudioStatus::Running && sample_rate.is_some()
+}
+
 fn selected<'a>(items: &'a [String], index: usize, empty: &'static str) -> &'a str {
     items.get(index).map(String::as_str).unwrap_or(empty)
 }
@@ -854,8 +945,8 @@ fn main() -> eframe::Result {
         "OpenMixer",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1160.0, 620.0])
-                .with_min_inner_size([980.0, 600.0])
+                .with_inner_size([1160.0, 665.0])
+                .with_min_inner_size([980.0, 645.0])
                 .with_icon(icon),
             ..Default::default()
         },
@@ -974,6 +1065,15 @@ mod tests {
         assert!(!UpdateState::Current.shows_button());
         assert!(UpdateState::Available.shows_button());
         assert!(UpdateState::Failed.shows_button());
+    }
+
+    #[test]
+    fn lan_button_reflects_server_and_audio_state() {
+        assert_eq!(lan_button_label(false), "START LAN LISTEN");
+        assert_eq!(lan_button_label(true), "STOP LAN LISTEN");
+        assert!(!can_start_lan(AudioStatus::Idle, Some(48_000)));
+        assert!(!can_start_lan(AudioStatus::Running, None));
+        assert!(can_start_lan(AudioStatus::Running, Some(48_000)));
     }
 
     #[test]
