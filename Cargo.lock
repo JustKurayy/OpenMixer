@@ -2148,6 +2148,7 @@ version = "0.2.0"
 dependencies = [
  "cpal",
  "eframe",
+ "getrandom 0.3.4",
  "ringbuf",
  "rustfft",
  "serde",
