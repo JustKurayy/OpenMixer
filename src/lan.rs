@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
-    net::{IpAddr, TcpListener, TcpStream, UdpSocket},
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -184,7 +184,8 @@ impl LanServer {
 
     pub fn start(&mut self, sample_rate: u32) -> Result<(), String> {
         self.stop();
-        let listener = TcpListener::bind(("0.0.0.0", 0))
+        let address = local_ipv4().ok_or("Could not determine this computer's LAN address")?;
+        let listener = TcpListener::bind(listener_address(address))
             .map_err(|error| format!("Could not start LAN listener: {error}"))?;
         listener
             .set_nonblocking(true)
@@ -193,7 +194,6 @@ impl LanServer {
             .local_addr()
             .map_err(|error| error.to_string())?
             .port();
-        let address = local_ipv4().ok_or("Could not determine this computer's LAN address")?;
         let url = format!("http://{address}:{port}");
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -569,6 +569,10 @@ fn local_ipv4() -> Option<IpAddr> {
     (!address.is_loopback() && !address.is_unspecified()).then_some(address)
 }
 
+fn listener_address(address: IpAddr) -> SocketAddr {
+    SocketAddr::new(address, 0)
+}
+
 fn wav_header(sample_rate: u32) -> [u8; 44] {
     let mut header = [0_u8; 44];
     header[0..4].copy_from_slice(b"RIFF");
@@ -664,5 +668,12 @@ mod tests {
         let stop = PLAYER_HTML.find("b.textContent='STOP'").unwrap();
         let play = PLAYER_HTML.find("await a.play()").unwrap();
         assert!(stop < play);
+    }
+
+    #[test]
+    fn listener_binds_only_to_the_selected_lan_address() {
+        let address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        assert_eq!(listener_address(address).ip(), address);
+        assert_eq!(listener_address(address).port(), 0);
     }
 }
