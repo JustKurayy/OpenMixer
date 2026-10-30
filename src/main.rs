@@ -16,6 +16,8 @@ const CYAN: Color32 = Color32::from_rgb(71, 190, 180);
 const GREEN: Color32 = Color32::from_rgb(42, 196, 101);
 const ORANGE: Color32 = Color32::from_rgb(239, 154, 35);
 const RED: Color32 = Color32::from_rgb(225, 48, 50);
+const CALIBRATION_MIN_DBA: f32 = 20.0;
+const CALIBRATION_MAX_DBA: f32 = 120.0;
 
 struct MixerState {
     devices: DeviceList,
@@ -52,26 +54,53 @@ impl MixerState {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct AppSettings {
+    input: Option<String>,
+    controls: DspControls,
+    full_scale_dba: f32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            input: None,
+            controls: DspControls::default(),
+            full_scale_dba: 100.0,
+        }
+    }
+}
+
 struct OpenMixerApp {
     audio: AudioEngine,
     state: MixerState,
     sample_rate: Option<u32>,
     notice: Option<String>,
     saved_input: Option<String>,
+    settings_dirty: bool,
 }
 
 impl OpenMixerApp {
     fn new(context: &eframe::CreationContext<'_>) -> Self {
         configure_style(&context.egui_ctx);
-        let saved_input = settings_path().as_deref().and_then(load_input);
+        let settings = settings_path()
+            .as_deref()
+            .map(load_settings)
+            .unwrap_or_default();
         let mut app = Self {
             audio: AudioEngine::new(),
-            state: MixerState::default(),
+            state: MixerState {
+                controls: settings.controls,
+                full_scale_dba: settings.full_scale_dba,
+                ..Default::default()
+            },
             sample_rate: None,
             notice: None,
-            saved_input,
+            saved_input: settings.input,
+            settings_dirty: false,
         };
         app.refresh_devices();
+        app.persist_settings();
         app
     }
 
@@ -81,6 +110,8 @@ impl OpenMixerApp {
                 self.state.devices = devices;
                 self.state.input_index =
                     preferred_input_index(&self.state.devices.inputs, self.saved_input.as_deref());
+                self.saved_input =
+                    remembered_input(&self.state.devices.inputs, self.saved_input.as_deref());
                 self.notice = None;
             }
             Err(error) => self.notice = Some(error),
@@ -117,12 +148,7 @@ impl OpenMixerApp {
                     .get(self.state.input_index)
                     .cloned()
             {
-                self.saved_input = Some(name.clone());
-                if let Some(path) = settings_path()
-                    && let Err(error) = save_input(&path, &name)
-                {
-                    self.notice = Some(format!("Could not remember input: {error}"));
-                }
+                self.saved_input = Some(name);
             }
             if ui.small_button("REFRESH").clicked() {
                 self.refresh_devices();
@@ -292,8 +318,14 @@ impl OpenMixerApp {
             loudness_bar(ui, dba.unwrap_or(0.0));
             ui.add_space(20.0);
             small_label(ui, "CALIBRATION");
-            ui.add(egui::Slider::new(&mut self.state.full_scale_dba, 80.0..=120.0).suffix(" dBA"))
-                .on_hover_text("Match this reading to a sound meter at your listening position");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.state.full_scale_dba,
+                    CALIBRATION_MIN_DBA..=CALIBRATION_MAX_DBA,
+                )
+                .suffix(" dBA"),
+            )
+            .on_hover_text("Match this reading to a sound meter at your listening position");
             ui.label(
                 RichText::new("Match a sound meter at your seat. Without calibration this is only an estimate.")
                     .size(10.0)
@@ -316,6 +348,7 @@ impl OpenMixerApp {
 
 impl eframe::App for OpenMixerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let settings_before = self.current_settings();
         let ctx = root.ctx().clone();
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
@@ -371,6 +404,31 @@ impl eframe::App for OpenMixerApp {
                     });
                 }
             });
+        if self.current_settings() != settings_before {
+            self.settings_dirty = true;
+        }
+        if self.settings_dirty && !ctx.input(|input| input.pointer.any_down()) {
+            self.persist_settings();
+            self.settings_dirty = false;
+        }
+    }
+}
+
+impl OpenMixerApp {
+    fn current_settings(&self) -> AppSettings {
+        AppSettings {
+            input: self.saved_input.clone(),
+            controls: self.state.controls,
+            full_scale_dba: self.state.full_scale_dba,
+        }
+    }
+
+    fn persist_settings(&mut self) {
+        if let Some(path) = settings_path()
+            && let Err(error) = save_settings(&path, &self.current_settings())
+        {
+            self.notice = Some(format!("Could not save settings: {error}"));
+        }
     }
 }
 
@@ -519,24 +577,100 @@ fn preferred_input_index(inputs: &[String], saved: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
+fn remembered_input(inputs: &[String], saved: Option<&str>) -> Option<String> {
+    saved.map(str::to_owned).or_else(|| inputs.first().cloned())
+}
+
 fn settings_path() -> Option<std::path::PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
-        .map(|home| home.join(".openmixer").join("input"))
+        .map(|home| home.join(".openmixer").join("settings.ini"))
 }
 
-fn load_input(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .filter(|name| !name.is_empty())
+fn load_settings(path: &std::path::Path) -> AppSettings {
+    let mut settings = AppSettings::default();
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return settings;
+    };
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "input" if !value.is_empty() => settings.input = Some(value.into()),
+            "hum_hz" => {
+                settings.controls.hum_hz = match value {
+                    "50" => Some(50.0),
+                    "60" => Some(60.0),
+                    _ => None,
+                }
+            }
+            "low_cut" => parse_bool(value, &mut settings.controls.low_cut),
+            "noise_reduction" => parse_f32(value, &mut settings.controls.noise_reduction),
+            "bass_db" => parse_f32(value, &mut settings.controls.bass_db),
+            "treble_db" => parse_f32(value, &mut settings.controls.treble_db),
+            "gain_percent" => parse_f32(value, &mut settings.controls.gain_percent),
+            "overdrive" => parse_bool(value, &mut settings.controls.overdrive),
+            "muted" => parse_bool(value, &mut settings.controls.muted),
+            "cleanup_bypassed" => parse_bool(value, &mut settings.controls.cleanup_bypassed),
+            "calibration_dba" => parse_f32(value, &mut settings.full_scale_dba),
+            _ => {}
+        }
+    }
+    settings.controls.noise_reduction = settings.controls.noise_reduction.clamp(0.0, 1.0);
+    settings.controls.bass_db = settings.controls.bass_db.clamp(-12.0, 12.0);
+    settings.controls.treble_db = settings.controls.treble_db.clamp(-12.0, 12.0);
+    let gain_max = if settings.controls.overdrive {
+        300.0
+    } else {
+        100.0
+    };
+    settings.controls.gain_percent = settings.controls.gain_percent.clamp(0.0, gain_max);
+    settings.full_scale_dba = settings
+        .full_scale_dba
+        .clamp(CALIBRATION_MIN_DBA, CALIBRATION_MAX_DBA);
+    settings
 }
 
-fn save_input(path: &std::path::Path, name: &str) -> std::io::Result<()> {
+fn parse_bool(value: &str, target: &mut bool) {
+    if let Ok(parsed) = value.parse() {
+        *target = parsed;
+    }
+}
+
+fn parse_f32(value: &str, target: &mut f32) {
+    if let Ok(parsed) = value.parse() {
+        *target = parsed;
+    }
+}
+
+fn save_settings(path: &std::path::Path, settings: &AppSettings) -> std::io::Result<()> {
     if let Some(directory) = path.parent() {
         std::fs::create_dir_all(directory)?;
     }
-    std::fs::write(path, name)
+    let hum = settings.controls.hum_hz.unwrap_or(0.0);
+    let input = settings
+        .input
+        .as_deref()
+        .unwrap_or("")
+        .replace(['\r', '\n'], " ");
+    std::fs::write(
+        path,
+        format!(
+            "[openmixer]\ninput={input}\nhum_hz={hum:.0}\nlow_cut={}\nnoise_reduction={}\nbass_db={}\ntreble_db={}\ngain_percent={}\noverdrive={}\nmuted={}\ncleanup_bypassed={}\ncalibration_dba={}\n",
+            settings.controls.low_cut,
+            settings.controls.noise_reduction,
+            settings.controls.bass_db,
+            settings.controls.treble_db,
+            settings.controls.gain_percent,
+            settings.controls.overdrive,
+            settings.controls.muted,
+            settings.controls.cleanup_bypassed,
+            settings.full_scale_dba,
+        ),
+    )
 }
 
 fn configure_style(context: &egui::Context) {
@@ -617,15 +751,53 @@ mod tests {
         let inputs = vec!["Microphone".into(), "Line In".into()];
         assert_eq!(preferred_input_index(&inputs, Some("Line In")), 1);
         assert_eq!(preferred_input_index(&inputs, Some("Missing")), 0);
+        assert_eq!(
+            remembered_input(&inputs, Some("Disconnected Line In")).as_deref(),
+            Some("Disconnected Line In")
+        );
+        assert_eq!(
+            remembered_input(&inputs, None).as_deref(),
+            Some("Microphone")
+        );
     }
 
     #[test]
-    fn selected_input_round_trips_through_settings_file() {
+    fn all_controls_round_trip_through_ini_settings() {
         let directory =
             std::env::temp_dir().join(format!("openmixer-settings-test-{}", std::process::id()));
-        let path = directory.join("input");
-        save_input(&path, "Line In (USB Audio)").unwrap();
-        assert_eq!(load_input(&path).as_deref(), Some("Line In (USB Audio)"));
+        let path = directory.join("settings.ini");
+        let settings = AppSettings {
+            input: Some("Line In (USB Audio)".into()),
+            controls: DspControls {
+                hum_hz: Some(60.0),
+                low_cut: true,
+                noise_reduction: 0.35,
+                bass_db: 2.5,
+                treble_db: -1.5,
+                gain_percent: 72.0,
+                overdrive: true,
+                muted: true,
+                cleanup_bypassed: true,
+            },
+            full_scale_dba: 42.0,
+        };
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path), settings);
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("ini")
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn calibration_loaded_below_twenty_is_clamped() {
+        let directory =
+            std::env::temp_dir().join(format!("openmixer-calibration-test-{}", std::process::id()));
+        let path = directory.join("settings.ini");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, "[openmixer]\ncalibration_dba=5\n").unwrap();
+        assert_eq!(load_settings(&path).full_scale_dba, 20.0);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -7,7 +7,7 @@ A small native desktop mixer for monitoring any line input without replacing or 
 ## What it does
 
 - Monitors only the input you select and follows the operating system's default playback device. It never changes that default.
-- Remembers the selected input in `.openmixer/input` inside your user profile.
+- Remembers the selected input, cleanup, hum, denoise, tone, level, mute, overdrive, bypass, and calibration settings in `.openmixer/settings.ini` inside your user profile.
 - Removes 50 Hz or 60 Hz mains hum and its first harmonics.
 - Starts with cleanup off for a transparent signal. Optional two-second noise learning enables stereo-linked spectral reduction.
 - Adds a 28 Hz rumble filter and ±12 dB bass/treble controls.
@@ -15,7 +15,7 @@ A small native desktop mixer for monitoring any line input without replacing or 
 - Shows a stereo program meter plus a calibrated A-weighted loudness estimate with green, orange, and red risk zones.
 - Runs as a native Rust application on Windows, macOS, and Linux through CPAL and egui.
 
-The large readout is an **estimated dB(A)** value. A-weighting is applied in the audio engine, but a line input cannot know the gain of your amplifier, speaker sensitivity, listening distance, or the system volume after OpenMixer. Calibrate the readout against a real sound meter at your listening position before treating it as meaningful. Green is below 85 dB(A), orange is 85–89 dB(A), and red is 90 dB(A) or higher. [NIOSH uses 85 dB(A) averaged over eight hours](https://www.cdc.gov/niosh/noise/about/noise.html) as its recommended exposure limit; loudness and exposure time both matter.
+The large readout is an **estimated dB(A)** value. A-weighting is applied in the audio engine, but a line input cannot know the gain of your amplifier, speaker sensitivity, listening distance, or the system volume after OpenMixer. The calibration control spans 20–120 dB(A); match it against a real sound meter at your listening position before treating the reading as meaningful. Green is below 85 dB(A), orange is 85–89 dB(A), and red is 90 dB(A) or higher. [NIOSH uses 85 dB(A) averaged over eight hours](https://www.cdc.gov/niosh/noise/about/noise.html) as its recommended exposure limit; loudness and exposure time both matter.
 
 ## Connect a line-level source
 

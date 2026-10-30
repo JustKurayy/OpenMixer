@@ -4,7 +4,7 @@ use std::{f32::consts::PI, sync::Arc};
 const FFT_SIZE: usize = 512;
 const HOP_SIZE: usize = FFT_SIZE / 2;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DspControls {
     pub hum_hz: Option<f32>,
     pub low_cut: bool,
