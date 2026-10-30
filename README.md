@@ -13,6 +13,7 @@ A small native desktop mixer for monitoring any line input without replacing or 
 - Adds a 28 Hz rumble filter and ±12 dB bass/treble controls.
 - Provides a 0–100% master fader. Overdrive extends it to 300% while peak protection remains active.
 - Shows a stereo program meter plus a calibrated A-weighted loudness estimate with green, orange, and red risk zones.
+- Streams the processed mix to paired phones and other browsers on the same local network without changing system audio routing.
 - Updates itself from the latest stable GitHub release on Windows without changing your saved mixer settings.
 - Runs as a native Rust application on Windows, macOS, and Linux through CPAL and egui.
 
@@ -30,6 +31,18 @@ The large readout is an **estimated dB(A)** value. A-weighting is applied in the
 8. To calibrate dB(A), play steady audio and adjust the calibration slider until OpenMixer matches a sound meter placed at your listening position.
 
 If the noise exists before playback starts, also check the cable, PC input gain, and audio interface. Try keeping connected equipment on the same power strip, and test a different line input or shielded cable. Software can reduce steady hum and hiss, but it cannot repair clipping or remove the electrical cause of a ground loop.
+
+## Listen from a phone
+
+1. Start **LISTEN** in OpenMixer, then select **START LAN LISTEN** in the narrow bar at the bottom.
+2. If Windows asks, allow OpenMixer through the firewall on **private networks**. Public-network access is unnecessary.
+3. Open the displayed `http://` address on a phone or other device connected to the same local network.
+4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds and locks after five incorrect attempts.
+5. Press **START** on the minimal player. After pairing, Start/Stop is its only visible control.
+
+The player uses the browser's native audio element and media session, so playback can continue when the browser is in the background or the phone is on its home screen. The first Start must be tapped by the user. A mobile operating system can still suspend any browser because of battery saving, memory pressure, or browser-specific background policies, so uninterrupted background playback cannot be guaranteed by a web page.
+
+LAN Listen sends uncompressed 16-bit stereo PCM from the end of OpenMixer's processing chain. At 48 kHz it uses about 1.5 Mbps per connected listener. Browser buffering adds latency, so this is intended for convenient listening rather than synchronized speakers or live performance monitoring. Pairing sessions exist only in memory and are erased when the server stops or OpenMixer closes. The server has no cloud relay, internet exposure, or automatic port forwarding.
 
 ## Install on Windows
 
@@ -80,10 +93,11 @@ selected line input
   → bass and treble
   → smoothed master gain / mute
   → peak protection
-  → operating system default output
+  ├→ operating system default output
+  └→ optional paired LAN listeners
 ```
 
-OpenMixer currently requires the selected devices to share a 48 kHz or 44.1 kHz mode and supports `f32`, `i16`, and `u16` sample formats. It uses about 50 ms of safety buffering plus the spectral window; actual end-to-end latency depends on the hardware and operating system and has not been measured here. Device disconnection, buffer underruns, and overflows are shown in the interface.
+OpenMixer currently requires the selected devices to share a 48 kHz or 44.1 kHz mode and supports `f32`, `i16`, and `u16` sample formats. It uses about 50 ms of safety buffering plus the spectral window; actual end-to-end latency depends on the hardware and operating system and has not been measured here. Device disconnection, buffer underruns, and overflows are shown in the interface. LAN listeners receive a bounded nonblocking copy of the processed signal, so a slow network device can drop audio but cannot stall desktop playback.
 
 The Windows build and UI were verified on the development machine. macOS and Linux use the same cross-platform audio code but still need hardware testing. Crackle restoration, recording, plugins, multiple buses, and virtual audio devices are intentionally outside this small release.
 

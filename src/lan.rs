@@ -143,18 +143,10 @@ fn hex(bytes: &[u8]) -> String {
     value
 }
 
+#[derive(Default)]
 struct SharedState {
     snapshot: LanSnapshot,
     auth: AuthState,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            snapshot: LanSnapshot::default(),
-            auth: AuthState::default(),
-        }
-    }
 }
 
 type AudioBlock = Arc<[u8]>;
@@ -568,7 +560,7 @@ fn pairing_page(request: &str, message: &str) -> String {
 
 const MOBILE_STYLE: &str = "*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;color:#eee;font-family:system-ui,sans-serif}main{display:grid;place-items:center}";
 
-const PLAYER_HTML: &str = r##"<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0d0f0f"><title>OpenMixer</title><style>*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;font-family:system-ui,sans-serif}main{display:grid;place-items:center}button{width:160px;height:160px;border:1px solid #3d4a47;border-radius:50%;background:#17201e;color:#63d6c5;font:700 18px system-ui,sans-serif;letter-spacing:.12em}</style></head><body><main><button id="toggle">START</button><audio id="audio" preload="none" playsinline></audio></main><script>const a=document.querySelector('#audio'),b=document.querySelector('#toggle');let live=false,retry=0;async function start(){a.src='/stream?fresh='+Date.now();try{await a.play();live=true;b.textContent='STOP';if('mediaSession'in navigator)navigator.mediaSession.playbackState='playing'}catch(e){live=false;b.textContent='START'}}function stop(){live=false;clearTimeout(retry);a.pause();a.removeAttribute('src');a.load();b.textContent='START';if('mediaSession'in navigator)navigator.mediaSession.playbackState='paused'}b.onclick=()=>live?stop():start();a.onerror=()=>{if(live){clearTimeout(retry);retry=setTimeout(start,1000)}};if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:'OpenMixer',artist:'LAN Listen'});navigator.mediaSession.setActionHandler('play',start);navigator.mediaSession.setActionHandler('pause',stop);navigator.mediaSession.setActionHandler('stop',stop)}</script></body></html>"##;
+const PLAYER_HTML: &str = r##"<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0d0f0f"><title>OpenMixer</title><style>*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;font-family:system-ui,sans-serif}main{display:grid;place-items:center}button{width:160px;height:160px;border:1px solid #3d4a47;border-radius:50%;background:#17201e;color:#63d6c5;font:700 18px system-ui,sans-serif;letter-spacing:.12em}</style></head><body><main><button id="toggle">START</button><audio id="audio" preload="none" playsinline></audio></main><script>const a=document.querySelector('#audio'),b=document.querySelector('#toggle');let live=false,retry=0;async function start(){live=true;b.textContent='STOP';if('mediaSession'in navigator)navigator.mediaSession.playbackState='playing';a.src='/stream?fresh='+Date.now();try{await a.play()}catch(e){if(live)stop()}}function stop(){live=false;clearTimeout(retry);a.pause();a.removeAttribute('src');a.load();b.textContent='START';if('mediaSession'in navigator)navigator.mediaSession.playbackState='paused'}b.onclick=()=>live?stop():start();a.onerror=()=>{if(live){clearTimeout(retry);retry=setTimeout(start,1000)}};if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:'OpenMixer',artist:'LAN Listen'});navigator.mediaSession.setActionHandler('play',start);navigator.mediaSession.setActionHandler('pause',stop);navigator.mediaSession.setActionHandler('stop',stop)}</script></body></html>"##;
 
 fn local_ipv4() -> Option<IpAddr> {
     let socket = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
@@ -665,5 +657,12 @@ mod tests {
         assert!(tap.push([1.0, -1.0]));
         assert!(!tap.push([0.5, 0.5]));
         assert_eq!(receiver.try_recv().unwrap(), [i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn phone_button_switches_to_stop_before_live_play_resolves() {
+        let stop = PLAYER_HTML.find("b.textContent='STOP'").unwrap();
+        let play = PLAYER_HTML.find("await a.play()").unwrap();
+        assert!(stop < play);
     }
 }
