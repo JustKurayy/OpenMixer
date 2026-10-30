@@ -215,9 +215,10 @@ fn choose_shared_rate(input: &[(u32, u32)], output: &[(u32, u32)]) -> Option<u32
     [48_000, 44_100].into_iter().find(|rate| input.iter().any(|(min, max)| min <= rate && rate <= max) && output.iter().any(|(min, max)| min <= rate && rate <= max))
 }
 
-fn input_frame(data: &[f32], frame: usize, channels: usize) -> [f32; 2] {
+fn input_frame<T: InputSample>(data: &[T], frame: usize, channels: usize) -> [f32; 2] {
     let index = frame * channels;
-    if channels == 1 { [data[index], data[index]] } else { [data[index], data[index + 1]] }
+    let left = data[index].into_f32();
+    if channels == 1 { [left, left] } else { [left, data[index + 1].into_f32()] }
 }
 
 fn i16_to_f32(value: i16) -> f32 { if value < 0 { value as f32 / 32768.0 } else { value as f32 / 32767.0 } }
@@ -254,9 +255,7 @@ where T: InputSample, P: Producer<Item = [f32; 2]> + Send + 'static {
         let learn = controls.learn_samples.swap(0, Ordering::AcqRel);
         if learn > 0 { dsp.begin_noise_learning(learn as usize); }
         for frame in data.chunks_exact(channels) {
-            let left = frame[0].into_f32();
-            let right = if channels > 1 { frame[1].into_f32() } else { left };
-            let output = dsp.process_frame([left, right], &control);
+            let output = dsp.process_frame(input_frame(frame, 0, channels), &control);
             push_frame(&mut producer, output, &telemetry.overflows);
         }
         let levels = dsp.levels();
