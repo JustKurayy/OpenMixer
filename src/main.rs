@@ -801,12 +801,15 @@ fn configure_style(context: &egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/openmixer.png"))
+        .expect("embedded OpenMixer icon must be valid PNG");
     eframe::run_native(
         "OpenMixer",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1160.0, 620.0])
-                .with_min_inner_size([980.0, 600.0]),
+                .with_min_inner_size([980.0, 600.0])
+                .with_icon(icon),
             ..Default::default()
         },
         Box::new(|context| Ok(Box::new(OpenMixerApp::new(context)))),

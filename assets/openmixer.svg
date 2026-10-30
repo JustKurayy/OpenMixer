@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">OpenMixer</title>
+  <description id="description">Three illuminated mixer faders on a dark console</description>
+  <rect width="512" height="512" rx="104" fill="#0c0e0f"/>
+  <rect x="28" y="28" width="456" height="456" rx="80" fill="#131617" stroke="#47beb4" stroke-width="16"/>
+  <g fill="#303435">
+    <rect x="124" y="105" width="20" height="302" rx="10"/>
+    <rect x="246" y="105" width="20" height="302" rx="10"/>
+    <rect x="368" y="105" width="20" height="302" rx="10"/>
+  </g>
+  <g stroke="#0c0e0f" stroke-width="14">
+    <rect x="86" y="176" width="96" height="64" rx="20" fill="#47beb4"/>
+    <rect x="208" y="298" width="96" height="64" rx="20" fill="#ef9a23"/>
+    <rect x="330" y="132" width="96" height="64" rx="20" fill="#2ac465"/>
+  </g>
+  <g fill="#cdd0ca">
+    <rect x="112" y="202" width="44" height="10" rx="5"/>
+    <rect x="234" y="324" width="44" height="10" rx="5"/>
+    <rect x="356" y="158" width="44" height="10" rx="5"/>
+  </g>
+</svg>
