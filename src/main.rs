@@ -4,7 +4,9 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use openmixer::{
     audio::{AudioEngine, AudioStatus, DeviceList, TelemetrySnapshot},
     dsp::{DspControls, MeterBand, dba_meter_band, estimated_dba},
+    update::{UpdateError, UpdateInfo, check_for_update, download_update},
 };
+use std::{path::PathBuf, sync::mpsc};
 
 const BG: Color32 = Color32::from_rgb(12, 14, 15);
 const STRIP: Color32 = Color32::from_rgb(19, 22, 23);
@@ -78,6 +80,29 @@ struct OpenMixerApp {
     notice: Option<String>,
     saved_input: Option<String>,
     settings_dirty: bool,
+    update_state: UpdateState,
+    update_receiver: Option<mpsc::Receiver<UpdateResult>>,
+}
+
+type UpdateResult = Result<Option<(UpdateInfo, PathBuf)>, UpdateError>;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum UpdateState {
+    Idle,
+    Working,
+    Current,
+    Failed,
+}
+
+impl UpdateState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "UPDATE",
+            Self::Working => "UPDATING…",
+            Self::Current => "UP TO DATE",
+            Self::Failed => "RETRY UPDATE",
+        }
+    }
 }
 
 impl OpenMixerApp {
@@ -98,6 +123,8 @@ impl OpenMixerApp {
             notice: None,
             saved_input: settings.input,
             settings_dirty: false,
+            update_state: UpdateState::Idle,
+            update_receiver: None,
         };
         app.refresh_devices();
         app.persist_settings();
@@ -183,8 +210,90 @@ impl OpenMixerApp {
                     AudioStatus::Idle => ("IDLE", MUTED),
                 };
                 ui.label(RichText::new(text).size(10.0).strong().color(color));
+                let update = ui.add_enabled(
+                    cfg!(target_os = "windows") && self.update_state != UpdateState::Working,
+                    egui::Button::new(
+                        RichText::new(self.update_state.label())
+                            .size(9.0)
+                            .color(CYAN),
+                    ),
+                );
+                if update
+                    .on_hover_text(if cfg!(target_os = "windows") {
+                        "Download and install the latest GitHub release"
+                    } else {
+                        "Automatic updates are currently available on Windows"
+                    })
+                    .clicked()
+                {
+                    self.start_update(ui.ctx());
+                }
             });
         });
+    }
+
+    fn start_update(&mut self, context: &egui::Context) {
+        let (sender, receiver) = mpsc::channel();
+        let context = context.clone();
+        self.update_state = UpdateState::Working;
+        self.notice = Some("Checking GitHub for an OpenMixer update…".into());
+        self.update_receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let result = check_for_update(env!("CARGO_PKG_VERSION")).and_then(|available| {
+                available
+                    .map(|update| download_update(&update).map(|path| (update, path)))
+                    .transpose()
+            });
+            let _ = sender.send(result);
+            context.request_repaint();
+        });
+    }
+
+    fn poll_update(&mut self, context: &egui::Context) {
+        let Some(receiver) = self.update_receiver.as_ref() else {
+            return;
+        };
+        let Ok(result) = receiver.try_recv() else {
+            return;
+        };
+        self.update_receiver = None;
+        match result {
+            Ok(None) => {
+                self.update_state = UpdateState::Current;
+                self.notice = Some(format!(
+                    "OpenMixer v{} is already up to date.",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            Ok(Some((update, downloaded))) => {
+                #[cfg(target_os = "windows")]
+                match openmixer::update::install_downloaded_update(&downloaded) {
+                    Ok(()) => {
+                        self.audio.stop();
+                        self.notice = Some(format!(
+                            "Installing OpenMixer v{} and restarting…",
+                            update.version
+                        ));
+                        context.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Err(error) => {
+                        self.update_state = UpdateState::Failed;
+                        self.notice = Some(error.to_string());
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = (update, downloaded);
+                    self.update_state = UpdateState::Failed;
+                    self.notice =
+                        Some("Automatic updates are currently available on Windows".into());
+                }
+            }
+            Err(error) => {
+                self.update_state = UpdateState::Failed;
+                self.notice = Some(error.to_string());
+            }
+        }
     }
 
     fn cleanup(&mut self, ui: &mut egui::Ui, status: AudioStatus, t: &TelemetrySnapshot) {
@@ -350,6 +459,7 @@ impl eframe::App for OpenMixerApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let settings_before = self.current_settings();
         let ctx = root.ctx().clone();
+        self.poll_update(&ctx);
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
         self.audio.set_controls(self.state.controls);
@@ -799,5 +909,13 @@ mod tests {
         std::fs::write(&path, "[openmixer]\ncalibration_dba=5\n").unwrap();
         assert_eq!(load_settings(&path).full_scale_dba, 20.0);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn updater_button_labels_each_state_clearly() {
+        assert_eq!(UpdateState::Idle.label(), "UPDATE");
+        assert_eq!(UpdateState::Working.label(), "UPDATING…");
+        assert_eq!(UpdateState::Current.label(), "UP TO DATE");
+        assert_eq!(UpdateState::Failed.label(), "RETRY UPDATE");
     }
 }
