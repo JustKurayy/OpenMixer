@@ -1,0 +1,17 @@
+[package]
+name = "openmixer"
+version = "0.1.0"
+edition = "2024"
+description = "A small cross-platform line-input mixer for vinyl playback"
+license = "MIT"
+
+[dependencies]
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "glow", "wayland", "x11"] }
+ringbuf = "0.6.0"
+rustfft = "6.4.1"
+
+[profile.release]
+lto = "thin"
+strip = true
+
