@@ -37,7 +37,7 @@ If the noise exists before playback starts, also check the cable, PC input gain,
 1. Start **LISTEN** in OpenMixer, then select **START LAN LISTEN** in the narrow bar at the bottom.
 2. If Windows asks, allow OpenMixer through the firewall on **private networks**. Public-network access is unnecessary.
 3. Open the displayed `http://` address on a phone or other device connected to the same local network.
-4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds and locks after five incorrect attempts.
+4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds, and five incorrect attempts block that device for 60 seconds.
 5. Press **START** on the minimal player. After pairing, Start/Stop is its only visible control.
 
 The player uses the browser's native audio element and media session, so playback can continue when the browser is in the background or the phone is on its home screen. The first Start must be tapped by the user. A mobile operating system can still suspend any browser because of battery saving, memory pressure, or browser-specific background policies, so uninterrupted background playback cannot be guaranteed by a web page.

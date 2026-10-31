@@ -77,10 +77,15 @@ enum PairingError {
 struct AuthState {
     pending: HashMap<String, PairRequest>,
     sessions: HashSet<String>,
+    blocked_until: HashMap<IpAddr, Instant>,
 }
 
 impl AuthState {
     fn begin_pairing(&mut self, peer: IpAddr, now: Instant) -> Result<PairRequest, String> {
+        self.blocked_until.retain(|_, until| *until > now);
+        if self.blocked_until.contains_key(&peer) {
+            return Err("Too many attempts; wait 60 seconds".into());
+        }
         self.pending
             .retain(|_, request| now.duration_since(request.created) <= PAIRING_LIFETIME);
         if let Some(request) = self.pending.values().find(|request| request.peer == peer) {
@@ -112,7 +117,9 @@ impl AuthState {
         if request.code != code {
             request.attempts += 1;
             if request.attempts >= MAX_PAIRING_ATTEMPTS {
+                let peer = request.peer;
                 self.pending.remove(id);
+                self.blocked_until.insert(peer, now + PAIRING_LIFETIME);
                 return Err(PairingError::TooManyAttempts);
             }
             return Err(PairingError::WrongCode);
@@ -638,6 +645,14 @@ mod tests {
         assert_eq!(
             auth.verify(&locked.id, locked.code, now),
             Err(PairingError::UnknownRequest)
+        );
+        assert_eq!(
+            auth.begin_pairing(peer, now).unwrap_err(),
+            "Too many attempts; wait 60 seconds"
+        );
+        assert!(
+            auth.begin_pairing(peer, now + Duration::from_secs(61))
+                .is_ok()
         );
     }
 
