@@ -647,7 +647,7 @@ fn pairing_page(request: &str, message: &str) -> String {
 
 const MOBILE_STYLE: &str = "*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;color:#eee;font-family:system-ui,sans-serif}main{display:grid;place-items:center}";
 
-const PLAYER_HTML: &str = r##"<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0d0f0f"><title>OpenMixer</title><style>*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;font-family:system-ui,sans-serif}main{display:grid;place-items:center}button{width:160px;height:160px;border:1px solid #3d4a47;border-radius:50%;background:#17201e;color:#63d6c5;font:700 18px system-ui,sans-serif;letter-spacing:.12em}</style></head><body><main><button id="toggle">START</button><audio id="audio" preload="none" playsinline></audio></main><script>const a=document.querySelector('#audio'),b=document.querySelector('#toggle');let live=false,retry=0,delay=500;async function start(reconnecting=false){live=true;b.textContent='STOP';if(reconnecting)b.textContent='RECONNECTING';if('mediaSession'in navigator)navigator.mediaSession.playbackState='playing';a.src='/stream?fresh='+Date.now();try{await a.play();delay=500;b.textContent='STOP'}catch(e){if(live)reconnecting?schedule():stop()}}function schedule(){if(!live||retry)return;b.textContent='RECONNECTING';retry=setTimeout(()=>{retry=0;start(true)},delay);delay=Math.min(5000,delay*2)}function stop(){live=false;clearTimeout(retry);retry=0;delay=500;a.pause();a.removeAttribute('src');a.load();b.textContent='START';if('mediaSession'in navigator)navigator.mediaSession.playbackState='paused'}b.onclick=()=>live?stop():start();a.onended=a.onerror=()=>schedule();if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:'OpenMixer',artist:'LAN Listen'});navigator.mediaSession.setActionHandler('play',()=>start());navigator.mediaSession.setActionHandler('pause',stop);navigator.mediaSession.setActionHandler('stop',stop)}</script></body></html>"##;
+const PLAYER_HTML: &str = r##"<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0d0f0f"><title>OpenMixer</title><style>*{box-sizing:border-box}html,body,main{width:100%;height:100%;margin:0}body{background:#0d0f0f;font-family:system-ui,sans-serif}main{display:grid;place-items:center}button{width:160px;height:160px;border:1px solid #3d4a47;border-radius:50%;background:#17201e;color:#63d6c5;font:700 18px system-ui,sans-serif;letter-spacing:.12em}</style></head><body><main><button id="toggle">START</button><audio id="audio" preload="none" playsinline></audio></main><script>const a=document.querySelector('#audio'),b=document.querySelector('#toggle');let live=false,retry=0,delay=500;async function start(reconnecting=false){live=true;b.textContent='STOP';if(reconnecting)b.textContent='RECONNECTING';if('mediaSession'in navigator)navigator.mediaSession.playbackState='playing';a.src='/stream?fresh='+Date.now();try{await a.play();delay=500;b.textContent='STOP'}catch(e){if(live)schedule()}}function schedule(){if(!live||retry)return;b.textContent='RECONNECTING';retry=setTimeout(()=>{retry=0;start(true)},delay);delay=Math.min(5000,delay*2)}function stop(){live=false;clearTimeout(retry);retry=0;delay=500;a.pause();a.removeAttribute('src');a.load();b.textContent='START';if('mediaSession'in navigator)navigator.mediaSession.playbackState='paused'}b.onclick=()=>live?stop():start();a.onended=a.onerror=()=>schedule();if('mediaSession'in navigator){navigator.mediaSession.metadata=new MediaMetadata({title:'OpenMixer',artist:'LAN Listen'});navigator.mediaSession.setActionHandler('play',()=>start());navigator.mediaSession.setActionHandler('pause',stop);navigator.mediaSession.setActionHandler('stop',stop)}</script></body></html>"##;
 
 fn local_ipv4() -> Option<IpAddr> {
     let socket = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
@@ -661,9 +661,10 @@ fn listener_address(address: IpAddr, port: u16) -> SocketAddr {
 }
 
 fn wav_header(sample_rate: u32) -> [u8; 44] {
+    const DATA_BYTES: u32 = (i32::MAX as u32 - 36) & !3;
     let mut header = [0_u8; 44];
     header[0..4].copy_from_slice(b"RIFF");
-    header[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    header[4..8].copy_from_slice(&(DATA_BYTES + 36).to_le_bytes());
     header[8..12].copy_from_slice(b"WAVE");
     header[12..16].copy_from_slice(b"fmt ");
     header[16..20].copy_from_slice(&16_u32.to_le_bytes());
@@ -674,7 +675,7 @@ fn wav_header(sample_rate: u32) -> [u8; 44] {
     header[32..34].copy_from_slice(&4_u16.to_le_bytes());
     header[34..36].copy_from_slice(&16_u16.to_le_bytes());
     header[36..40].copy_from_slice(b"data");
-    header[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    header[40..44].copy_from_slice(&DATA_BYTES.to_le_bytes());
     header
 }
 
@@ -752,6 +753,11 @@ mod tests {
         );
         assert_eq!(u16::from_le_bytes([header[34], header[35]]), 16);
         assert_eq!(&header[36..40], b"data");
+        let riff_bytes = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let data_bytes = u32::from_le_bytes(header[40..44].try_into().unwrap());
+        assert_eq!(data_bytes % 4, 0, "PCM data must end on a stereo frame");
+        assert_eq!(riff_bytes, data_bytes + 36);
+        assert!(riff_bytes <= i32::MAX as u32);
     }
 
     #[test]
@@ -767,6 +773,10 @@ mod tests {
         let stop = PLAYER_HTML.find("b.textContent='STOP'").unwrap();
         let play = PLAYER_HTML.find("await a.play()").unwrap();
         assert!(stop < play);
+        assert!(
+            PLAYER_HTML.contains("catch(e){if(live)schedule()}"),
+            "a mobile playback rejection must retry without resetting the button to START"
+        );
     }
 
     #[test]
