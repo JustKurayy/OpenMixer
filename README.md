@@ -7,7 +7,7 @@ A small native desktop mixer for monitoring any line input without replacing or 
 ## What it does
 
 - Monitors only the input you select and follows the operating system's default playback device. It never changes that default.
-- Remembers the selected input, cleanup, hum, denoise, tone, level, mute, overdrive, bypass, and calibration settings in `.openmixer/settings.ini` inside your user profile.
+- Remembers the selected input, cleanup, hum, denoise, tone, level, mute, overdrive, bypass, calibration, and LAN port settings in `.openmixer/settings.ini` inside your user profile.
 - Removes 50 Hz or 60 Hz mains hum and its first harmonics.
 - Starts with cleanup off for a transparent signal. Optional two-second noise learning enables stereo-linked spectral reduction.
 - Adds a 28 Hz rumble filter and ±12 dB bass/treble controls.
@@ -34,7 +34,7 @@ If the noise exists before playback starts, also check the cable, PC input gain,
 
 ## Listen from a phone
 
-1. Start **LISTEN** in OpenMixer, then select **START LAN LISTEN** in the narrow bar at the bottom.
+1. Start **LISTEN** in OpenMixer. LAN Listen uses port **51777** by default; edit the port beside the LAN button first if you need another one, then select **START LAN LISTEN**.
 2. If Windows asks, allow OpenMixer through the firewall on **private networks**. Public-network access is unnecessary.
 3. Open the displayed `http://` address on a phone or other device connected to the same local network.
 4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds, and five incorrect attempts block that device for 60 seconds.

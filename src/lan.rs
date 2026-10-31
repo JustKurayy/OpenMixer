@@ -13,6 +13,7 @@ use std::{
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(60);
 const SESSION_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+pub const DEFAULT_PORT: u16 = 51_777;
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const MAX_CONNECTIONS: usize = 32;
 const MAX_STREAM_CLIENTS: usize = 8;
@@ -212,11 +213,14 @@ impl LanServer {
         )
     }
 
-    pub fn start(&mut self, sample_rate: u32) -> Result<(), String> {
+    pub fn start(&mut self, sample_rate: u32, port: u16) -> Result<(), String> {
         self.stop();
+        if port == 0 {
+            return Err("LAN port must be between 1 and 65535".into());
+        }
         let address = local_ipv4().ok_or("Could not determine this computer's LAN address")?;
-        let listener = TcpListener::bind(listener_address(address))
-            .map_err(|error| format!("Could not start LAN listener: {error}"))?;
+        let listener = TcpListener::bind(listener_address(address, port))
+            .map_err(|error| format!("Could not start LAN listener on port {port}: {error}"))?;
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("Could not configure LAN listener: {error}"))?;
@@ -652,8 +656,8 @@ fn local_ipv4() -> Option<IpAddr> {
     (!address.is_loopback() && !address.is_unspecified()).then_some(address)
 }
 
-fn listener_address(address: IpAddr) -> SocketAddr {
-    SocketAddr::new(address, 0)
+fn listener_address(address: IpAddr, port: u16) -> SocketAddr {
+    SocketAddr::new(address, port)
 }
 
 fn wav_header(sample_rate: u32) -> [u8; 44] {
@@ -786,8 +790,8 @@ mod tests {
     #[test]
     fn listener_binds_only_to_the_selected_lan_address() {
         let address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
-        assert_eq!(listener_address(address).ip(), address);
-        assert_eq!(listener_address(address).port(), 0);
+        assert_eq!(listener_address(address, 49_152).ip(), address);
+        assert_eq!(listener_address(address, 49_152).port(), 49_152);
     }
 
     #[test]

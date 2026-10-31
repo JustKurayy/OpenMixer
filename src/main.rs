@@ -4,7 +4,7 @@ use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Stroke
 use openmixer::{
     audio::{AudioEngine, AudioStatus, DeviceList, TelemetrySnapshot},
     dsp::{DspControls, MeterBand, dba_meter_band, estimated_dba},
-    lan::LanServer,
+    lan::{DEFAULT_PORT, LanServer},
     update::{UpdateError, UpdateInfo, check_for_update, download_update},
 };
 use std::{path::PathBuf, sync::mpsc};
@@ -62,6 +62,7 @@ struct AppSettings {
     input: Option<String>,
     controls: DspControls,
     full_scale_dba: f32,
+    lan_port: u16,
 }
 
 impl Default for AppSettings {
@@ -70,6 +71,7 @@ impl Default for AppSettings {
             input: None,
             controls: DspControls::default(),
             full_scale_dba: 100.0,
+            lan_port: DEFAULT_PORT,
         }
     }
 }
@@ -82,6 +84,7 @@ struct OpenMixerApp {
     notice: Option<String>,
     status_notice: Option<String>,
     saved_input: Option<String>,
+    lan_port: u16,
     settings_dirty: bool,
     update_state: UpdateState,
     update_receiver: Option<mpsc::Receiver<UpdateEvent>>,
@@ -144,6 +147,7 @@ impl OpenMixerApp {
             notice: None,
             status_notice: None,
             saved_input: settings.input,
+            lan_port: settings.lan_port,
             settings_dirty: false,
             update_state: if cfg!(target_os = "windows") {
                 UpdateState::starting()
@@ -528,11 +532,20 @@ impl OpenMixerApp {
                         if snapshot.running {
                             self.lan.stop();
                         } else if let Some(sample_rate) = self.sample_rate
-                            && let Err(error) = self.lan.start(sample_rate)
+                            && let Err(error) = self.lan.start(sample_rate, self.lan_port)
                         {
                             self.notice = Some(error);
                         }
                     }
+
+                    small_label(ui, "PORT");
+                    ui.add_enabled(
+                        !snapshot.running,
+                        egui::DragValue::new(&mut self.lan_port)
+                            .range(1..=u16::MAX)
+                            .speed(1.0),
+                    )
+                    .on_hover_text("LAN Listen port; saved for the next launch");
 
                     if let Some(url) = snapshot.url.as_ref() {
                         ui.label(RichText::new(url).size(10.0).color(TEXT));
@@ -656,6 +669,7 @@ impl OpenMixerApp {
             input: self.saved_input.clone(),
             controls: self.state.controls,
             full_scale_dba: self.state.full_scale_dba,
+            lan_port: self.lan_port,
         }
     }
 
@@ -864,6 +878,13 @@ fn load_settings(path: &std::path::Path) -> AppSettings {
             "muted" => parse_bool(value, &mut settings.controls.muted),
             "cleanup_bypassed" => parse_bool(value, &mut settings.controls.cleanup_bypassed),
             "calibration_dba" => parse_f32(value, &mut settings.full_scale_dba),
+            "lan_port" => {
+                if let Ok(port) = value.parse::<u16>()
+                    && port != 0
+                {
+                    settings.lan_port = port;
+                }
+            }
             _ => {}
         }
     }
@@ -907,7 +928,7 @@ fn save_settings(path: &std::path::Path, settings: &AppSettings) -> std::io::Res
     std::fs::write(
         path,
         format!(
-            "[openmixer]\ninput={input}\nhum_hz={hum:.0}\nlow_cut={}\nnoise_reduction={}\nbass_db={}\ntreble_db={}\ngain_percent={}\noverdrive={}\nmuted={}\ncleanup_bypassed={}\ncalibration_dba={}\n",
+            "[openmixer]\ninput={input}\nhum_hz={hum:.0}\nlow_cut={}\nnoise_reduction={}\nbass_db={}\ntreble_db={}\ngain_percent={}\noverdrive={}\nmuted={}\ncleanup_bypassed={}\ncalibration_dba={}\nlan_port={}\n",
             settings.controls.low_cut,
             settings.controls.noise_reduction,
             settings.controls.bass_db,
@@ -917,6 +938,7 @@ fn save_settings(path: &std::path::Path, settings: &AppSettings) -> std::io::Res
             settings.controls.muted,
             settings.controls.cleanup_bypassed,
             settings.full_scale_dba,
+            settings.lan_port,
         ),
     )
 }
@@ -1031,6 +1053,7 @@ mod tests {
                 cleanup_bypassed: true,
             },
             full_scale_dba: 42.0,
+            lan_port: 49_152,
         };
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path), settings);
@@ -1038,6 +1061,18 @@ mod tests {
             path.extension().and_then(|value| value.to_str()),
             Some("ini")
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn default_and_invalid_lan_ports_use_51777() {
+        assert_eq!(AppSettings::default().lan_port, 51_777);
+        let directory =
+            std::env::temp_dir().join(format!("openmixer-port-test-{}", std::process::id()));
+        let path = directory.join("settings.ini");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, "[openmixer]\nlan_port=0\n").unwrap();
+        assert_eq!(load_settings(&path).lan_port, 51_777);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
