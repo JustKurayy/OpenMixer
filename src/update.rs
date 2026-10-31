@@ -17,6 +17,7 @@ pub struct UpdateInfo {
 pub struct ReplacementCommand {
     pub program: &'static str,
     pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
 }
 
 #[derive(Debug)]
@@ -104,7 +105,7 @@ pub fn replacement_command(
     current: &std::path::Path,
     process_id: u32,
 ) -> ReplacementCommand {
-    const SCRIPT: &str = "$source=$args[0];$target=$args[1];$oldPid=[int]$args[2];Wait-Process -Id $oldPid -ErrorAction SilentlyContinue;Move-Item -LiteralPath $source -Destination $target -Force;Start-Process -FilePath $target";
+    const SCRIPT: &str = "$ErrorActionPreference='Stop';$source=$env:OPENMIXER_UPDATE_SOURCE;$target=$env:OPENMIXER_UPDATE_TARGET;$oldPid=[int]$env:OPENMIXER_UPDATE_PID;Wait-Process -Id $oldPid -ErrorAction SilentlyContinue;Move-Item -LiteralPath $source -Destination $target -Force;Start-Process -FilePath $target";
     ReplacementCommand {
         program: "powershell.exe",
         args: vec![
@@ -113,9 +114,17 @@ pub fn replacement_command(
             "Hidden".into(),
             "-Command".into(),
             SCRIPT.into(),
-            downloaded.as_os_str().to_owned(),
-            current.as_os_str().to_owned(),
-            process_id.to_string().into(),
+        ],
+        env: vec![
+            (
+                "OPENMIXER_UPDATE_SOURCE".into(),
+                downloaded.as_os_str().to_owned(),
+            ),
+            (
+                "OPENMIXER_UPDATE_TARGET".into(),
+                current.as_os_str().to_owned(),
+            ),
+            ("OPENMIXER_UPDATE_PID".into(), process_id.to_string().into()),
         ],
     }
 }
@@ -130,6 +139,7 @@ pub fn install_downloaded_update(downloaded: &std::path::Path) -> Result<(), Upd
     let replacement = replacement_command(downloaded, &current, std::process::id());
     std::process::Command::new(replacement.program)
         .args(replacement.args)
+        .envs(replacement.env)
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|error| UpdateError::new(format!("Could not start updater: {error}")))?;
@@ -264,14 +274,48 @@ mod tests {
         assert!(validate_windows_executable(&valid).is_ok());
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn replacement_command_keeps_paths_as_separate_arguments() {
-        let source = std::path::Path::new(r"C:\Temp Folder\openmixer's update.exe");
-        let target = std::path::Path::new(r"C:\Users\Me\OpenMixer\openmixer.exe");
-        let command = replacement_command(source, target, 4242);
-        assert_eq!(command.program, "powershell.exe");
-        assert_eq!(command.args[5], source.as_os_str());
-        assert_eq!(command.args[6], target.as_os_str());
-        assert_eq!(command.args[7], "4242");
+    fn replacement_command_moves_and_launches_paths_with_spaces_and_apostrophes() {
+        use std::{process::Command, thread, time::Duration};
+
+        let directory =
+            std::env::temp_dir().join(format!("openmixer updater test {}", std::process::id()));
+        let source = directory.join("new update's copy.cmd");
+        let target = directory.join("installed app's copy.cmd");
+        let restarted = directory.join("restarted.txt");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            &source,
+            "@echo off\r\necho restarted>\"%~dp0restarted.txt\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(&target, "@echo off\r\necho old\r\n").unwrap();
+
+        let command = replacement_command(&source, &target, i32::MAX as u32);
+        let output = Command::new(command.program)
+            .args(command.args)
+            .envs(command.env)
+            .output()
+            .unwrap();
+        for _ in 0..100 {
+            if restarted.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let installed = std::fs::read_to_string(&target).unwrap();
+        let source_exists = source.exists();
+        let restarted_exists = restarted.exists();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(
+            output.status.success(),
+            "PowerShell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!source_exists, "downloaded update was not moved");
+        assert!(installed.contains("echo restarted"));
+        assert!(restarted_exists, "updated target was not launched");
     }
 }
