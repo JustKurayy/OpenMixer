@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
@@ -12,7 +12,10 @@ use std::{
 };
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(60);
+const SESSION_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
+const MAX_CONNECTIONS: usize = 32;
+const MAX_STREAM_CLIENTS: usize = 8;
 const AUDIO_QUEUE_FRAMES: usize = 9_600;
 const CLIENT_QUEUE_BLOCKS: usize = 8;
 const FRAMES_PER_BLOCK: usize = 960;
@@ -76,7 +79,7 @@ enum PairingError {
 #[derive(Default)]
 struct AuthState {
     pending: HashMap<String, PairRequest>,
-    sessions: HashSet<String>,
+    sessions: HashMap<String, Instant>,
     blocked_until: HashMap<IpAddr, Instant>,
 }
 
@@ -131,13 +134,33 @@ impl AuthState {
             return Err(PairingError::UnknownRequest);
         }
         let token = hex(&random);
-        self.sessions.insert(token.clone());
+        self.sessions.insert(token.clone(), now + SESSION_LIFETIME);
         Ok(token)
     }
 
-    fn is_authorized(&self, token: &str) -> bool {
-        !token.is_empty() && self.sessions.contains(token)
+    fn is_authorized(&mut self, token: &str, now: Instant) -> bool {
+        self.sessions.retain(|_, expires| *expires > now);
+        !token.is_empty() && self.sessions.contains_key(token)
     }
+}
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn try_acquire_connection(active: Arc<AtomicUsize>) -> Option<ConnectionPermit> {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+            (count < MAX_CONNECTIONS).then_some(count + 1)
+        })
+        .ok()?;
+    Some(ConnectionPermit { active })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -281,16 +304,37 @@ fn run_listener(
     clients: ClientList,
     stop: Arc<AtomicBool>,
 ) {
+    let active_connections = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
-            Ok((stream, peer)) => {
+            Ok((mut stream, peer)) => {
+                let Some(permit) = try_acquire_connection(Arc::clone(&active_connections)) else {
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                    let _ = send_text(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        "text/plain",
+                        "LAN Share is busy",
+                        "Retry-After: 1\r\n",
+                    );
+                    continue;
+                };
                 let shared = Arc::clone(&shared);
                 let clients = Arc::clone(&clients);
                 let stop = Arc::clone(&stop);
-                thread::spawn(move || {
-                    let _ =
-                        handle_connection(stream, peer.ip(), sample_rate, shared, clients, stop);
-                });
+                let _ = thread::Builder::new()
+                    .name("openmixer-lan-client".into())
+                    .spawn(move || {
+                        let _permit = permit;
+                        let _ = handle_connection(
+                            stream,
+                            peer.ip(),
+                            sample_rate,
+                            shared,
+                            clients,
+                            stop,
+                        );
+                    });
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(20));
@@ -334,11 +378,18 @@ fn handle_connection(
             );
         }
     };
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
             let mut state = shared.lock().unwrap();
-            if state.auth.is_authorized(&request.session) {
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if state.auth.is_authorized(&request.session, Instant::now()) {
+                drop(state);
                 send_text(
                     &mut stream,
                     "200 OK",
@@ -354,15 +405,19 @@ fn handle_connection(
                             code: pairing.code,
                         });
                         let page = pairing_page(&pairing.id, "");
+                        drop(state);
                         send_text(&mut stream, "200 OK", "text/html; charset=utf-8", &page, "")
                     }
-                    Err(error) => send_text(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        "text/plain",
-                        &error,
-                        "",
-                    ),
+                    Err(error) => {
+                        drop(state);
+                        send_text(
+                            &mut stream,
+                            "500 Internal Server Error",
+                            "text/plain",
+                            &error,
+                            "",
+                        )
+                    }
                 }
             }
         }
@@ -374,16 +429,21 @@ fn handle_connection(
                 .and_then(|value| value.parse::<u8>().ok())
                 .unwrap_or(0);
             let mut state = shared.lock().unwrap();
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
             match state.auth.verify(id, code, Instant::now()) {
                 Ok(token) => {
                     state.snapshot.pending = None;
+                    drop(state);
                     send_text(
                         &mut stream,
                         "303 See Other",
                         "text/plain",
                         "Paired",
                         &format!(
-                            "Location: /\r\nSet-Cookie: openmixer_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400\r\n"
+                            "Location: /\r\nSet-Cookie: openmixer_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}\r\n",
+                            SESSION_LIFETIME.as_secs()
                         ),
                     )
                 }
@@ -398,6 +458,7 @@ fn handle_connection(
                         PairingError::UnknownRequest => "Pairing request is no longer valid",
                     };
                     let page = pairing_page(id, message);
+                    drop(state);
                     send_text(
                         &mut stream,
                         "403 Forbidden",
@@ -411,7 +472,10 @@ fn handle_connection(
         ("GET", "/stream") => {
             let authorized = shared
                 .lock()
-                .map(|state| state.auth.is_authorized(&request.session))
+                .map(|mut state| {
+                    !stop.load(Ordering::Acquire)
+                        && state.auth.is_authorized(&request.session, Instant::now())
+                })
                 .unwrap_or(false);
             if !authorized {
                 return send_text(
@@ -422,12 +486,24 @@ fn handle_connection(
                     "",
                 );
             }
+            let (sender, receiver) = mpsc::sync_channel(CLIENT_QUEUE_BLOCKS);
+            {
+                let mut connected = clients.lock().unwrap();
+                if connected.len() >= MAX_STREAM_CLIENTS {
+                    return send_text(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        "text/plain",
+                        "Too many listeners",
+                        "Retry-After: 1\r\n",
+                    );
+                }
+                connected.push(sender);
+            }
             stream.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
             )?;
             stream.write_all(&wav_header(sample_rate))?;
-            let (sender, receiver) = mpsc::sync_channel(CLIENT_QUEUE_BLOCKS);
-            clients.lock().unwrap().push(sender);
             if let Ok(mut state) = shared.lock() {
                 state.snapshot.clients += 1;
             }
@@ -602,6 +678,10 @@ fn wav_header(sample_rate: u32) -> [u8; 44] {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -615,7 +695,7 @@ mod tests {
         let token = auth
             .verify(&request.id, request.code, now + Duration::from_secs(1))
             .unwrap();
-        assert!(auth.is_authorized(&token));
+        assert!(auth.is_authorized(&token, now + Duration::from_secs(1)));
         assert!(auth.pending.is_empty());
     }
 
@@ -690,5 +770,59 @@ mod tests {
         let address = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
         assert_eq!(listener_address(address).ip(), address);
         assert_eq!(listener_address(address).port(), 0);
+    }
+
+    #[test]
+    fn sessions_expire_on_the_server() {
+        let now = Instant::now();
+        let mut auth = AuthState::default();
+        let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let request = auth.begin_pairing(peer, now).unwrap();
+        let token = auth.verify(&request.id, request.code, now).unwrap();
+
+        assert!(auth.is_authorized(&token, now + SESSION_LIFETIME - Duration::from_secs(1)));
+        assert!(!auth.is_authorized(&token, now + SESSION_LIFETIME));
+        assert!(!auth.sessions.contains_key(&token));
+    }
+
+    #[test]
+    fn connection_limit_recovers_when_a_handler_exits() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            permits.push(try_acquire_connection(Arc::clone(&active)).unwrap());
+        }
+        assert!(try_acquire_connection(Arc::clone(&active)).is_none());
+        assert_eq!(active.load(Ordering::Relaxed), MAX_CONNECTIONS);
+
+        permits.pop();
+        assert!(try_acquire_connection(Arc::clone(&active)).is_some());
+    }
+
+    #[test]
+    fn stopped_server_rejects_an_already_accepted_request_without_mutating_state() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, peer) = listener.accept().unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let clients = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(true));
+        handle_connection(
+            server,
+            peer.ip(),
+            48_000,
+            Arc::clone(&shared),
+            clients,
+            stop,
+        )
+        .unwrap();
+
+        let state = shared.lock().unwrap();
+        assert!(state.auth.pending.is_empty());
+        assert_eq!(state.snapshot, LanSnapshot::default());
     }
 }
