@@ -40,7 +40,7 @@ If the noise exists before playback starts, also check the cable, PC input gain,
 4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds, and five incorrect attempts block that device for 60 seconds.
 5. Press **START** on the minimal player. After pairing, Start/Stop is its only visible control.
 
-The player uses the browser's native audio element and media session, so playback can continue when the browser is in the background or the phone is on its home screen. The first Start must be tapped by the user. A mobile operating system can still suspend any browser because of battery saving, memory pressure, or browser-specific background policies, so uninterrupted background playback cannot be guaranteed by a web page.
+The player uses the browser's native audio element and media session, so playback can continue when the browser is in the background or the phone is on its home screen. The first Start must be tapped by the user. If the live connection ends, the player shows **RECONNECTING** and retries with a short bounded backoff. A mobile operating system can still suspend any browser because of battery saving, memory pressure, or browser-specific background policies, so uninterrupted background playback cannot be guaranteed by a web page.
 
 LAN Listen sends uncompressed 16-bit stereo PCM from the end of OpenMixer's processing chain. At 48 kHz it uses about 1.5 Mbps per connected listener. Browser buffering adds latency, so this is intended for convenient listening rather than synchronized speakers or live performance monitoring. Pairing sessions exist only in memory, expire after 24 hours, and are erased when the server stops or OpenMixer closes. LAN Share accepts up to eight simultaneous listeners and limits concurrent request handling to protect the desktop audio path. The server has no cloud relay, internet exposure, or automatic port forwarding.
 
@@ -97,7 +97,7 @@ selected line input
   └→ optional paired LAN listeners
 ```
 
-OpenMixer currently requires the selected devices to share a 48 kHz or 44.1 kHz mode and supports `f32`, `i16`, and `u16` sample formats. It uses about 50 ms of safety buffering plus the spectral window; actual end-to-end latency depends on the hardware and operating system and has not been measured here. Device disconnection, buffer underruns, and overflows are shown in the interface. LAN listeners receive a bounded nonblocking copy of the processed signal, so a slow network device can drop audio but cannot stall desktop playback.
+OpenMixer currently requires the selected devices to share a 48 kHz or 44.1 kHz mode and supports `f32`, `i16`, and `u16` sample formats. It uses about 50 ms of safety buffering plus the spectral window; actual end-to-end latency depends on the hardware and operating system and has not been measured here. Device disconnection, buffer underruns, and overflows are shown in the interface. LAN listeners receive a bounded nonblocking copy of the processed signal with less than 70 ms of application-side network queueing, so a slow network device can drop audio but cannot stall desktop playback. Browser and operating-system buffers add latency beyond that queue.
 
 The Windows build and UI were verified on the development machine. macOS and Linux use the same cross-platform audio code but still need hardware testing. Crackle restoration, recording, plugins, multiple buses, and virtual audio devices are intentionally outside this small release.
 
