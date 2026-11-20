@@ -309,6 +309,9 @@ impl AudioEngine {
         self.input_stream = None;
         self.output_stream = None;
         self.telemetry.status.store(0, Ordering::Relaxed);
+        if let Ok(mut error) = self.telemetry.error.lock() {
+            *error = None;
+        }
     }
 }
 
@@ -609,5 +612,18 @@ mod tests {
         assert_eq!(pop_frame(&mut consumer, &underrun), [0.1, 0.2]);
         assert_eq!(pop_frame(&mut consumer, &underrun), [0.0, 0.0]);
         assert_eq!(underrun.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn stopping_after_a_stream_fault_clears_the_stale_error() {
+        let mut engine = AudioEngine::new();
+        set_stream_error(&engine.telemetry, "configuration became invalid".into());
+        assert_eq!(engine.status(), AudioStatus::Fault);
+        assert!(engine.telemetry().error.is_some());
+
+        engine.stop();
+
+        assert_eq!(engine.status(), AudioStatus::Idle);
+        assert_eq!(engine.telemetry().error, None);
     }
 }

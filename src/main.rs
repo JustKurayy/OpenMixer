@@ -7,6 +7,8 @@ use openmixer::{
     lan::{DEFAULT_PORT, LanServer},
     update::{UpdateError, UpdateInfo, check_for_update, download_update},
 };
+#[cfg(target_os = "windows")]
+use std::{os::windows::process::CommandExt, process::Command};
 use std::{path::PathBuf, sync::mpsc};
 
 const BG: Color32 = Color32::from_rgb(12, 14, 15);
@@ -175,6 +177,34 @@ impl OpenMixerApp {
                 self.notice = None;
             }
             Err(error) => self.notice = Some(error),
+        }
+    }
+
+    fn recover_audio_fault(&mut self) {
+        if self.audio.status() != AudioStatus::Fault {
+            return;
+        }
+
+        let lan_was_running = self.lan.snapshot().running;
+        let previous_rate = self.sample_rate;
+        self.refresh_devices();
+        match self.audio.start(self.state.input_index) {
+            Ok(rate) => {
+                self.sample_rate = Some(rate);
+                self.notice = None;
+                self.status_notice = Some("AUDIO STREAM REBUILT".into());
+                if lan_recovery_action(lan_was_running, previous_rate, rate)
+                    == LanRecoveryAction::Restart
+                    && let Err(error) = self.lan.start(rate, self.lan_port)
+                {
+                    self.notice = Some(error);
+                }
+            }
+            Err(error) => {
+                self.sample_rate = None;
+                self.lan.stop();
+                self.notice = Some(format!("Could not rebuild audio stream: {error}"));
+            }
         }
     }
 
@@ -531,10 +561,13 @@ impl OpenMixerApp {
                     {
                         if snapshot.running {
                             self.lan.stop();
-                        } else if let Some(sample_rate) = self.sample_rate
-                            && let Err(error) = self.lan.start(sample_rate, self.lan_port)
-                        {
-                            self.notice = Some(error);
+                        } else if let Some(sample_rate) = self.sample_rate {
+                            match ensure_private_firewall_rule(self.lan_port)
+                                .and_then(|()| self.lan.start(sample_rate, self.lan_port))
+                            {
+                                Ok(()) => self.notice = None,
+                                Err(error) => self.notice = Some(error),
+                            }
                         }
                     }
 
@@ -589,6 +622,7 @@ impl eframe::App for OpenMixerApp {
         let settings_before = self.current_settings();
         let ctx = root.ctx().clone();
         self.poll_update(&ctx);
+        self.recover_audio_fault();
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
         if status != AudioStatus::Running && self.lan.snapshot().running {
@@ -827,6 +861,115 @@ fn lan_button_label(running: bool) -> &'static str {
 
 fn can_start_lan(status: AudioStatus, sample_rate: Option<u32>) -> bool {
     status == AudioStatus::Running && sample_rate.is_some()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LanRecoveryAction {
+    None,
+    Keep,
+    Restart,
+}
+
+fn lan_recovery_action(
+    lan_was_running: bool,
+    previous_rate: Option<u32>,
+    recovered_rate: u32,
+) -> LanRecoveryAction {
+    if !lan_was_running {
+        LanRecoveryAction::None
+    } else if previous_rate == Some(recovered_rate) {
+        LanRecoveryAction::Keep
+    } else {
+        LanRecoveryAction::Restart
+    }
+}
+
+fn firewall_rule_name(port: u16) -> String {
+    format!("OpenMixer LAN Listen {port}")
+}
+
+fn firewall_rule_arguments(port: u16) -> [String; 11] {
+    [
+        "advfirewall".into(),
+        "firewall".into(),
+        "add".into(),
+        "rule".into(),
+        format!("name={}", firewall_rule_name(port)),
+        "dir=in".into(),
+        "action=allow".into(),
+        "protocol=TCP".into(),
+        format!("localport={port}"),
+        "profile=private".into(),
+        "remoteip=localsubnet".into(),
+    ]
+}
+
+fn firewall_argument_line(port: u16) -> String {
+    firewall_rule_arguments(port)
+        .iter()
+        .map(|argument| {
+            if argument.contains(' ') {
+                format!("\"{argument}\"")
+            } else {
+                argument.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn firewall_elevation_script(port: u16) -> String {
+    let argument_line = firewall_argument_line(port).replace('\'', "''");
+    format!(
+        "$ErrorActionPreference='Stop';try{{$p=Start-Process -FilePath 'netsh.exe' -ArgumentList '{argument_line}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden;exit $p.ExitCode}}catch{{exit 1}}"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_private_firewall_rule(port: u16) -> Result<(), String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let name = firewall_rule_name(port);
+    let query = Command::new("netsh.exe")
+        .args([
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            &format!("name={name}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|error| format!("Could not inspect Windows Firewall: {error}"))?;
+    if query.success() {
+        return Ok(());
+    }
+
+    let script = firewall_elevation_script(port);
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|error| format!("Could not request Windows Firewall permission: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "LAN Share needs Windows Firewall permission for the selected private-network port"
+                .into(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_private_firewall_rule(_port: u16) -> Result<(), String> {
+    Ok(())
 }
 
 fn selected<'a>(items: &'a [String], index: usize, empty: &'static str) -> &'a str {
@@ -1118,5 +1261,49 @@ mod tests {
         assert!(UpdateState::Installing.is_informational());
         assert!(UpdateState::Current.is_informational());
         assert!(!UpdateState::Failed.is_informational());
+    }
+
+    #[test]
+    fn audio_recovery_keeps_or_restarts_lan_for_the_recovered_rate() {
+        assert_eq!(
+            lan_recovery_action(false, Some(48_000), 48_000),
+            LanRecoveryAction::None
+        );
+        assert_eq!(
+            lan_recovery_action(true, Some(48_000), 48_000),
+            LanRecoveryAction::Keep
+        );
+        assert_eq!(
+            lan_recovery_action(true, Some(44_100), 48_000),
+            LanRecoveryAction::Restart
+        );
+    }
+
+    #[test]
+    fn firewall_rule_is_scoped_to_the_selected_port() {
+        assert_eq!(firewall_rule_name(51_777), "OpenMixer LAN Listen 51777");
+        assert_eq!(
+            firewall_rule_arguments(51_777),
+            [
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=OpenMixer LAN Listen 51777",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=51777",
+                "profile=private",
+                "remoteip=localsubnet",
+            ]
+        );
+        assert_eq!(
+            firewall_argument_line(51_777),
+            "advfirewall firewall add rule \"name=OpenMixer LAN Listen 51777\" dir=in action=allow protocol=TCP localport=51777 profile=private remoteip=localsubnet"
+        );
+        let script = firewall_elevation_script(51_777);
+        assert!(script.contains("$ErrorActionPreference='Stop'"));
+        assert!(script.contains("catch{exit 1}"));
     }
 }

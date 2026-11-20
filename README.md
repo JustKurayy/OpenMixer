@@ -35,7 +35,7 @@ If the noise exists before playback starts, also check the cable, PC input gain,
 ## Listen from a phone
 
 1. Start **LISTEN** in OpenMixer. LAN Listen uses port **51777** by default; edit the port beside the LAN button first if you need another one, then select **START LAN LISTEN**.
-2. If Windows asks, allow OpenMixer through the firewall on **private networks**. Public-network access is unnecessary.
+2. On first use of a port, accept the Windows administrator prompt. OpenMixer adds one inbound TCP rule for that port, limited to **private networks** and the local subnet; public-network access is unnecessary.
 3. Open the displayed `http://` address on a phone or other device connected to the same local network.
 4. The desktop displays a temporary two-digit pairing code when that device requests access. Enter it on the device; it expires after 60 seconds, and five incorrect attempts block that device for 60 seconds.
 5. Press **START** on the minimal player. After pairing, Start/Stop is its only visible control.
@@ -53,6 +53,8 @@ Download the current release from the [OpenMixer releases page](https://github.c
 - **Loose EXE** — the same standalone program without the accompanying files. This stable asset name is also what the in-app updater downloads.
 
 OpenMixer checks GitHub quietly at startup. The **UPDATE** button stays hidden when the app is current and appears only when a newer stable release is ready; clicking it downloads the replacement, closes OpenMixer, updates its own EXE, and restarts. If the check fails, a **RETRY UPDATE** button appears. The installed and portable editions use the same updater, and `.openmixer/settings.ini` is left untouched. Automatic updating is currently available on Windows; macOS and Linux builds still require a manual update.
+
+If Windows invalidates an active audio stream after a USB or default-playback-device change, OpenMixer rebuilds the stream automatically. LAN Share stays active when the recovered sample rate is unchanged and restarts its server only when the rate changes.
 
 OpenMixer is not currently code-signed, so Windows SmartScreen may show an unknown-publisher warning on first launch. The release page includes SHA-256 digests for manual verification.
 
