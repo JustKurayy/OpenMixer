@@ -9,9 +9,12 @@ use ringbuf::{
     HeapRb,
     traits::{Consumer, Producer, Split},
 };
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU32, AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, AtomicU64, Ordering},
+    },
+    thread,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -218,89 +221,17 @@ impl AudioEngine {
 
     pub fn start(&mut self, input_index: usize) -> Result<u32, String> {
         self.stop();
-        let host = cpal::default_host();
-        let input = host
-            .input_devices()
-            .map_err(|e| e.to_string())?
-            .nth(input_index)
-            .ok_or("Selected input is no longer available")?;
-        let output = host
-            .default_output_device()
-            .ok_or("The operating system has no default playback device")?;
-        let (input_config, output_config) = select_configs(&input, &output)?;
-        let sample_rate = input_config.sample_rate();
-        let ring = HeapRb::<[f32; 2]>::new((sample_rate as usize * 120) / 1_000);
-        let (mut producer, consumer) = ring.split();
-        for _ in 0..(sample_rate as usize * 50) / 1_000 {
-            let _ = producer.try_push([0.0; 2]);
-        }
-
         self.telemetry.underruns.store(0, Ordering::Relaxed);
         self.telemetry.overflows.store(0, Ordering::Relaxed);
-        if let Ok(mut error) = self.telemetry.error.lock() {
-            *error = None;
-        }
-
-        let input_stream = match input_config.sample_format() {
-            SampleFormat::F32 => build_input::<f32, _>(
-                &input,
-                input_config.into(),
-                producer,
-                Arc::clone(&self.controls),
-                Arc::clone(&self.telemetry),
-                self.lan_tap.clone(),
-            )?,
-            SampleFormat::I16 => build_input::<i16, _>(
-                &input,
-                input_config.into(),
-                producer,
-                Arc::clone(&self.controls),
-                Arc::clone(&self.telemetry),
-                self.lan_tap.clone(),
-            )?,
-            SampleFormat::U16 => build_input::<u16, _>(
-                &input,
-                input_config.into(),
-                producer,
-                Arc::clone(&self.controls),
-                Arc::clone(&self.telemetry),
-                self.lan_tap.clone(),
-            )?,
-            format => return Err(format!("Input sample format {format} is not supported yet")),
-        };
-        let output_stream = match output_config.sample_format() {
-            SampleFormat::F32 => build_output::<f32, _>(
-                &output,
-                output_config.into(),
-                consumer,
-                Arc::clone(&self.telemetry),
-            )?,
-            SampleFormat::I16 => build_output::<i16, _>(
-                &output,
-                output_config.into(),
-                consumer,
-                Arc::clone(&self.telemetry),
-            )?,
-            SampleFormat::U16 => build_output::<u16, _>(
-                &output,
-                output_config.into(),
-                consumer,
-                Arc::clone(&self.telemetry),
-            )?,
-            format => {
-                return Err(format!(
-                    "Output sample format {format} is not supported yet"
-                ));
-            }
-        };
-        output_stream
-            .play()
-            .map_err(|e| format!("Could not start output: {e}"))?;
-        input_stream
-            .play()
-            .map_err(|e| format!("Could not start input: {e}"))?;
-        self.input_stream = Some(input_stream);
-        self.output_stream = Some(output_stream);
+        let controls = Arc::clone(&self.controls);
+        let telemetry = Arc::clone(&self.telemetry);
+        let lan_tap = self.lan_tap.clone();
+        let started = run_audio_setup_thread(move || {
+            build_streams(input_index, controls, telemetry, lan_tap)
+        })?;
+        let sample_rate = started.sample_rate;
+        self.input_stream = Some(started.input);
+        self.output_stream = Some(started.output);
         self.telemetry.status.store(1, Ordering::Relaxed);
         Ok(sample_rate)
     }
@@ -313,6 +244,110 @@ impl AudioEngine {
             *error = None;
         }
     }
+}
+
+struct StartedStreams {
+    input: Stream,
+    output: Stream,
+    sample_rate: u32,
+}
+
+fn run_audio_setup_thread<T, F>(setup: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    thread::Builder::new()
+        .name("openmixer-audio-setup".into())
+        .spawn(setup)
+        .map_err(|error| format!("Could not create audio setup thread: {error}"))?
+        .join()
+        .map_err(|_| "Audio setup thread stopped unexpectedly".to_owned())?
+}
+
+fn build_streams(
+    input_index: usize,
+    controls: Arc<AtomicControls>,
+    telemetry: Arc<SharedTelemetry>,
+    lan_tap: Option<AudioTap>,
+) -> Result<StartedStreams, String> {
+    let host = cpal::default_host();
+    let input = host
+        .input_devices()
+        .map_err(|e| e.to_string())?
+        .nth(input_index)
+        .ok_or("Selected input is no longer available")?;
+    let output = host
+        .default_output_device()
+        .ok_or("The operating system has no default playback device")?;
+    let (input_config, output_config) = select_configs(&input, &output)?;
+    let sample_rate = input_config.sample_rate();
+    let ring = HeapRb::<[f32; 2]>::new((sample_rate as usize * 120) / 1_000);
+    let (mut producer, consumer) = ring.split();
+    for _ in 0..(sample_rate as usize * 50) / 1_000 {
+        let _ = producer.try_push([0.0; 2]);
+    }
+
+    let input_stream = match input_config.sample_format() {
+        SampleFormat::F32 => build_input::<f32, _>(
+            &input,
+            input_config.into(),
+            producer,
+            Arc::clone(&controls),
+            Arc::clone(&telemetry),
+            lan_tap.clone(),
+        )?,
+        SampleFormat::I16 => build_input::<i16, _>(
+            &input,
+            input_config.into(),
+            producer,
+            Arc::clone(&controls),
+            Arc::clone(&telemetry),
+            lan_tap.clone(),
+        )?,
+        SampleFormat::U16 => build_input::<u16, _>(
+            &input,
+            input_config.into(),
+            producer,
+            controls,
+            Arc::clone(&telemetry),
+            lan_tap,
+        )?,
+        format => return Err(format!("Input sample format {format} is not supported yet")),
+    };
+    let output_stream = match output_config.sample_format() {
+        SampleFormat::F32 => build_output::<f32, _>(
+            &output,
+            output_config.into(),
+            consumer,
+            Arc::clone(&telemetry),
+        )?,
+        SampleFormat::I16 => build_output::<i16, _>(
+            &output,
+            output_config.into(),
+            consumer,
+            Arc::clone(&telemetry),
+        )?,
+        SampleFormat::U16 => {
+            build_output::<u16, _>(&output, output_config.into(), consumer, telemetry)?
+        }
+        format => {
+            return Err(format!(
+                "Output sample format {format} is not supported yet"
+            ));
+        }
+    };
+    output_stream
+        .play()
+        .map_err(|e| format!("Could not start output: {e}"))?;
+    input_stream
+        .play()
+        .map_err(|e| format!("Could not start input: {e}"))?;
+    Ok(StartedStreams {
+        input: input_stream,
+        output: output_stream,
+        sample_rate,
+    })
 }
 
 fn device_label(device: &Device) -> String {
@@ -625,5 +660,20 @@ mod tests {
 
         assert_eq!(engine.status(), AudioStatus::Idle);
         assert_eq!(engine.telemetry().error, None);
+    }
+
+    #[test]
+    fn audio_setup_runs_on_a_fresh_named_thread() {
+        let caller = std::thread::current().id();
+        let (worker, name) = run_audio_setup_thread(|| {
+            Ok((
+                std::thread::current().id(),
+                std::thread::current().name().map(str::to_owned),
+            ))
+        })
+        .unwrap();
+
+        assert_ne!(worker, caller);
+        assert_eq!(name.as_deref(), Some("openmixer-audio-setup"));
     }
 }
