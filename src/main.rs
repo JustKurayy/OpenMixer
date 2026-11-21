@@ -9,7 +9,11 @@ use openmixer::{
 };
 #[cfg(target_os = "windows")]
 use std::{os::windows::process::CommandExt, process::Command};
-use std::{path::PathBuf, sync::mpsc};
+use std::{
+    path::PathBuf,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 const BG: Color32 = Color32::from_rgb(12, 14, 15);
 const STRIP: Color32 = Color32::from_rgb(19, 22, 23);
@@ -78,11 +82,63 @@ impl Default for AppSettings {
     }
 }
 
+const AUDIO_RECOVERY_DELAYS: [Duration; 6] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(5),
+];
+
+#[derive(Default)]
+struct AudioRecovery {
+    retry_at: Option<Instant>,
+    failed_attempts: usize,
+    lan_was_running: bool,
+    previous_rate: Option<u32>,
+}
+
+impl AudioRecovery {
+    fn active(&self) -> bool {
+        self.retry_at.is_some()
+    }
+
+    fn begin(&mut self, now: Instant, lan_was_running: bool, previous_rate: Option<u32>) {
+        if self.active() {
+            return;
+        }
+        self.retry_at = Some(now + AUDIO_RECOVERY_DELAYS[0]);
+        self.failed_attempts = 0;
+        self.lan_was_running = lan_was_running;
+        self.previous_rate = previous_rate;
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        self.retry_at.is_some_and(|retry_at| now >= retry_at)
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        let delay_index = self.failed_attempts.min(AUDIO_RECOVERY_DELAYS.len() - 1);
+        self.retry_at = Some(now + AUDIO_RECOVERY_DELAYS[delay_index]);
+    }
+
+    fn forget_lan(&mut self) {
+        self.lan_was_running = false;
+    }
+
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+}
+
 struct OpenMixerApp {
     audio: AudioEngine,
     lan: LanServer,
     state: MixerState,
     sample_rate: Option<u32>,
+    audio_recovery: AudioRecovery,
     notice: Option<String>,
     status_notice: Option<String>,
     saved_input: Option<String>,
@@ -146,6 +202,7 @@ impl OpenMixerApp {
                 ..Default::default()
             },
             sample_rate: None,
+            audio_recovery: AudioRecovery::default(),
             notice: None,
             status_notice: None,
             saved_input: settings.input,
@@ -181,29 +238,37 @@ impl OpenMixerApp {
     }
 
     fn recover_audio_fault(&mut self) {
-        if self.audio.status() != AudioStatus::Fault {
+        let now = Instant::now();
+        if self.audio.status() == AudioStatus::Fault && !self.audio_recovery.active() {
+            self.audio_recovery
+                .begin(now, self.lan.snapshot().running, self.sample_rate);
+        }
+        if !self.audio_recovery.due(now) {
             return;
         }
 
-        let lan_was_running = self.lan.snapshot().running;
-        let previous_rate = self.sample_rate;
+        let lan_was_running = self.audio_recovery.lan_was_running;
+        let previous_rate = self.audio_recovery.previous_rate;
         self.refresh_devices();
         match self.audio.start(self.state.input_index) {
             Ok(rate) => {
                 self.sample_rate = Some(rate);
                 self.notice = None;
                 self.status_notice = Some("AUDIO STREAM REBUILT".into());
-                if lan_recovery_action(lan_was_running, previous_rate, rate)
-                    == LanRecoveryAction::Restart
+                if lan_was_running
+                    && (!self.lan.snapshot().running
+                        || lan_recovery_action(lan_was_running, previous_rate, rate)
+                            == LanRecoveryAction::Restart)
                     && let Err(error) = self.lan.start(rate, self.lan_port)
                 {
                     self.notice = Some(error);
                 }
+                self.audio_recovery.cancel();
             }
             Err(error) => {
-                self.sample_rate = None;
-                self.lan.stop();
-                self.notice = Some(format!("Could not rebuild audio stream: {error}"));
+                self.notice = Some(format!("Waiting for system audio: {error}"));
+                self.status_notice = None;
+                self.audio_recovery.failed(Instant::now());
             }
         }
     }
@@ -244,13 +309,14 @@ impl OpenMixerApp {
                 self.refresh_devices();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if MixerState::can_stop(status) {
+                if MixerState::can_stop(status) || self.audio_recovery.active() {
                     if ui
                         .button(RichText::new("STOP").color(RED).strong())
                         .clicked()
                     {
                         self.audio.stop();
                         self.lan.stop();
+                        self.audio_recovery.cancel();
                         self.sample_rate = None;
                     }
                 } else if ui
@@ -268,10 +334,11 @@ impl OpenMixerApp {
                         Err(error) => self.notice = Some(error),
                     }
                 }
-                let (text, color) = match status {
-                    AudioStatus::Running => ("LIVE", GREEN),
-                    AudioStatus::Fault => ("FAULT", RED),
-                    AudioStatus::Idle => ("IDLE", MUTED),
+                let (text, color) = match (self.audio_recovery.active(), status) {
+                    (true, _) => ("RECOVERING", ORANGE),
+                    (false, AudioStatus::Running) => ("LIVE", GREEN),
+                    (false, AudioStatus::Fault) => ("FAULT", RED),
+                    (false, AudioStatus::Idle) => ("IDLE", MUTED),
                 };
                 ui.label(RichText::new(text).size(10.0).strong().color(color));
                 if self.update_state.shows_button()
@@ -561,6 +628,7 @@ impl OpenMixerApp {
                     {
                         if snapshot.running {
                             self.lan.stop();
+                            self.audio_recovery.forget_lan();
                         } else if let Some(sample_rate) = self.sample_rate {
                             match ensure_private_firewall_rule(self.lan_port)
                                 .and_then(|()| self.lan.start(sample_rate, self.lan_port))
@@ -625,12 +693,17 @@ impl eframe::App for OpenMixerApp {
         self.recover_audio_fault();
         let status = self.audio.status();
         let telemetry = self.audio.telemetry();
-        if status != AudioStatus::Running && self.lan.snapshot().running {
+        if status != AudioStatus::Running
+            && !self.audio_recovery.active()
+            && self.lan.snapshot().running
+        {
             self.lan.stop();
         }
         self.audio.set_controls(self.state.controls);
         if status == AudioStatus::Running {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        } else if self.audio_recovery.active() {
+            ctx.request_repaint_after(Duration::from_millis(50));
         } else if self.lan.snapshot().running {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -1277,6 +1350,32 @@ mod tests {
             lan_recovery_action(true, Some(44_100), 48_000),
             LanRecoveryAction::Restart
         );
+    }
+
+    #[test]
+    fn audio_recovery_retries_with_a_five_second_cap_until_cancelled() {
+        let now = std::time::Instant::now();
+        let mut recovery = AudioRecovery::default();
+        recovery.begin(now, true, Some(48_000));
+
+        assert!(recovery.active());
+        assert!(!recovery.due(now));
+        assert!(recovery.due(now + std::time::Duration::from_millis(250)));
+        assert!(recovery.lan_was_running);
+
+        let expected = [500, 1_000, 2_000, 4_000, 5_000, 5_000];
+        let mut attempt_time = now + std::time::Duration::from_millis(250);
+        for delay_ms in expected {
+            recovery.failed(attempt_time);
+            assert!(!recovery.due(attempt_time));
+            attempt_time += std::time::Duration::from_millis(delay_ms);
+            assert!(recovery.due(attempt_time));
+        }
+
+        recovery.forget_lan();
+        assert!(!recovery.lan_was_running);
+        recovery.cancel();
+        assert!(!recovery.active());
     }
 
     #[test]

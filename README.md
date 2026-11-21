@@ -54,7 +54,7 @@ Download the current release from the [OpenMixer releases page](https://github.c
 
 OpenMixer checks GitHub quietly at startup. The **UPDATE** button stays hidden when the app is current and appears only when a newer stable release is ready; clicking it downloads the replacement, closes OpenMixer, updates its own EXE, and restarts. If the check fails, a **RETRY UPDATE** button appears. The installed and portable editions use the same updater, and `.openmixer/settings.ini` is left untouched. Automatic updating is currently available on Windows; macOS and Linux builds still require a manual update.
 
-If Windows invalidates an active audio stream after a USB or default-playback-device change, OpenMixer rebuilds the stream automatically. LAN Share stays active when the recovered sample rate is unchanged and restarts its server only when the rate changes.
+If Windows invalidates an active audio stream after a USB or default-playback-device change, OpenMixer waits for the new device and retries automatically with a five-second maximum interval until recovery or **STOP**. LAN Share stays active during recovery and restarts its server only when the recovered sample rate changes.
 
 OpenMixer is not currently code-signed, so Windows SmartScreen may show an unknown-publisher warning on first launch. The release page includes SHA-256 digests for manual verification.
 
