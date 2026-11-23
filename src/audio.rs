@@ -277,9 +277,7 @@ fn build_streams(
         .map_err(|e| e.to_string())?
         .nth(input_index)
         .ok_or("Selected input is no longer available")?;
-    let output = host
-        .default_output_device()
-        .ok_or("The operating system has no default playback device")?;
+    let output = system_output_device(&host)?;
     let (input_config, output_config) = select_configs(&input, &output)?;
     let sample_rate = input_config.sample_rate();
     let ring = HeapRb::<[f32; 2]>::new((sample_rate as usize * 120) / 1_000);
@@ -348,6 +346,35 @@ fn build_streams(
         output: output_stream,
         sample_rate,
     })
+}
+
+fn concrete_default<D, I: PartialEq>(
+    default: &D,
+    listed: impl IntoIterator<Item = D>,
+    id: impl Fn(&D) -> Option<I>,
+) -> Option<D> {
+    let wanted = id(default)?;
+    listed
+        .into_iter()
+        .find(|device| id(device).as_ref() == Some(&wanted))
+}
+
+#[cfg(target_os = "windows")]
+fn system_output_device(host: &cpal::Host) -> Result<Device, String> {
+    let default = host
+        .default_output_device()
+        .ok_or("The operating system has no default playback device")?;
+    let listed = host
+        .output_devices()
+        .map_err(|error| format!("Cannot list playback devices: {error}"))?;
+    concrete_default(&default, listed, |device| device.id().ok())
+        .ok_or("The default playback device is still changing".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_output_device(host: &cpal::Host) -> Result<Device, String> {
+    host.default_output_device()
+        .ok_or("The operating system has no default playback device".into())
 }
 
 fn device_label(device: &Device) -> String {
@@ -675,5 +702,23 @@ mod tests {
 
         assert_ne!(worker, caller);
         assert_eq!(name.as_deref(), Some("openmixer-audio-setup"));
+    }
+
+    #[test]
+    fn concrete_output_is_selected_by_the_current_default_endpoint_id() {
+        let default = ("default", Some(2));
+        let listed = [("speakers", Some(1)), ("steam", Some(2))];
+        let selected = concrete_default(&default, listed, |device| device.1).unwrap();
+        assert_eq!(selected.0, "steam");
+
+        assert!(concrete_default(&default, [("speakers", Some(1))], |device| device.1).is_none());
+        assert!(
+            concrete_default(
+                &("default", None::<u8>),
+                [("speakers", None::<u8>)],
+                |device| device.1,
+            )
+            .is_none()
+        );
     }
 }
